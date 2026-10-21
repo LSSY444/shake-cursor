@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  syntax:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Byte-compile every Python entry point
+        run: |
+          python -m py_compile shake_cursor.pyw
+          python -m py_compile autostart.py
+          python -m py_compile stop.py
+          python -m py_compile tools/make_preview.py
+          python -m py_compile tools/publish.py
+      - name: Autostart helper prints its status without touching the registry
+        run: python autostart.py status
