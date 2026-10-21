@@ -1,0 +1,15 @@
+# runtime outputs
+*.log
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# editors / os
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
