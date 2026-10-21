@@ -7,9 +7,9 @@
 
 仅支持 Windows，需要 Python 3.8+，**零第三方依赖**（纯 `ctypes` 调 Win32，不需要 `pip install`）。
 
-![预览](docs/preview.png)
+![演示](docs/demo.gif)
 
-<sub>左 → 中 → 右：正常指针、晃一下后的放大指针、约 1 秒后恢复原样。</sub>
+<sub>晃一下鼠标 → 指针变成实心 3 倍大箭头 → 约 1 秒后缩回原样。</sub>
 
 ---
 

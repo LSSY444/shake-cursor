@@ -7,9 +7,9 @@ the pointer turns into a solid, 3× larger arrow for a moment, then shrinks back
 
 Windows-only, Python 3.8+, **zero dependencies** (pure `ctypes` + Win32, no `pip install`).
 
-![preview](docs/preview.png)
+![demo](docs/demo.gif)
 
-<sub>Left → middle → right: normal pointer, the enlarged pointer after a shake, and back to normal ~1 second later.</sub>
+<sub>Shake the mouse → the pointer becomes a solid 3× arrow → it shrinks back about a second later.</sub>
 
 ---
 
