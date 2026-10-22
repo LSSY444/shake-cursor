@@ -10,6 +10,39 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## English
 
+### [1.5.1] — 2026-10-22
+
+**Rolled the shake detection back to the 1.3.2 behaviour.**
+
+1.4.0 loosened the detector to make touchpads work (a 12 px opposite stroke counted as a
+reversal, a 1 s movement-time window, pauses tolerated). In daily use it then fired when it
+should not. 1.5.0 replaced the criterion with a shape test (amplitude + path ratio), which
+was better but still not what was wanted. Rather than keep tuning, the decision was to go
+back to the version that felt stable.
+
+#### Changed
+
+- Parameters are back to **14 px** minimum stroke, **0.60 s** window, **3** reversals.
+- The state machine is back to its pre-1.4.0 form: a reversal requires the opposite stroke
+  to retrace the whole previous leg, and the window counts wall-clock time.
+- Removed: the sensitivity levels (`low`/`normal`/`high`) and their tray submenu, the
+  dominant-axis check, the shape test (`SHAKE_MIN_SWING` / `SHAKE_PATH_RATIO`), the
+  movement-time window and the pause budget.
+
+#### What this trades away
+
+Two limitations come back with 1.3.2, and they are accepted deliberately:
+
+- a touchpad gesture split into several swipes (swipe → lift → swipe) rarely accumulates
+  three reversals, so it often does not fire;
+- drawing a circle can still trigger the effect.
+
+Everything else from 1.4.0/1.5.0 is untouched: tray menu, appearance settings, scene
+awareness, auto-reload, `state.json`.
+
+The reverted work is preserved in git (commits `0c74018`, `631f7bc`) if it is picked up
+again later.
+
 ### [1.5.0] — 2026-10-22
 
 **The trigger mechanism changed: it now judges the shape of the motion.**
@@ -265,6 +298,32 @@ First public release.
 ---
 
 ## 中文
+
+### [1.5.1] — 2026-10-22
+
+**摇动检测回退到 1.3.2 的行为。**
+
+1.4.0 为了适配触控板放宽了判定（反向 12px 就算折返、1 秒动作时间窗、容忍停顿），
+结果日常使用时过于灵敏。1.5.0 把判据换成"看形状"（振幅 + 路径之比），好一些，但仍不是想要的手感。
+与其继续调参，决定回到那个用起来稳定、没有意外的版本。
+
+#### 改动
+
+- 参数回到 **14px** 单程门槛、**0.60s** 时间窗、**3** 次折返。
+- 状态机回到 1.4.0 之前的写法：一次折返要求反向走完上一整段位移，时间窗按墙上时间算。
+- 移除：灵敏度三档（低/标准/高）及其托盘子菜单、主导轴判定、形状判定
+  （`SHAKE_MIN_SWING` / `SHAKE_PATH_RATIO`）、动作时间窗、停顿预算。
+
+#### 换回来的是什么
+
+1.3.2 的两个限制随之回来，这是有意的取舍：
+
+- 触控板上分成几段的滑动（滑→抬手→滑）很难攒够三次折返，经常不触发；
+- 画圈仍然可能误触发。
+
+1.4.0/1.5.0 的其他东西全部保留：托盘菜单、外观设置、场景感知、自动重启、`state.json`。
+
+被回退的代码保留在 git 历史里（`0c74018`、`631f7bc`），以后想捡起来随时可以。
 
 ### [1.5.0] — 2026-10-22
 

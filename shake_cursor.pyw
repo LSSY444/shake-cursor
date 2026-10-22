@@ -17,7 +17,6 @@
 
 import atexit
 import ctypes
-from collections import deque
 import json
 import logging
 import math
@@ -31,30 +30,14 @@ from ctypes import (POINTER, Structure, byref, c_int, c_ssize_t, c_ubyte, c_uint
 from ctypes import wintypes as w
 
 # ============================ 可调参数 ============================
-__version__       = "1.5.0"   # 1.5.0: 按运动形状判定; 1.4.0: 触控板可触发
+__version__       = "1.5.1"   # 1.5.1: 检测逻辑回退到 1.3.2 行为
 PEAK_SCALE        = 3.0    # 默认峰值放大倍数(可在 settings.json 的 appearance.scale 覆盖)
 GROW_SEC          = 0.13   # 放大耗时(秒)
 HOLD_SEC          = 0.72   # 保持最大时长(秒)
 SHRINK_SEC        = 0.26   # 缩回耗时(秒)
-SHAKE_MIN_RUN     = 12     # 单程最小位移(像素), 越大越不灵敏
-SHAKE_WINDOW      = 1.00   # 摇动时间窗(秒) —— 只累计"正在动"的时间, 见 AxisShake
+SHAKE_MIN_RUN     = 14     # 单程最小位移(像素), 越大越不灵敏
+SHAKE_WINDOW      = 0.60   # 摇动时间窗(秒)
 SHAKE_REVERSALS   = 3      # 窗口内需要的折返次数(3 次 ≈ 来回晃 1.5 下)
-PAUSE_BUDGET      = 1.20   # 连续静止超过这么久, 认为这次手势结束并清零
-MOVE_EPS          = 0.6    # 小于这个位移算"没动"(触控板空闲时会抖几个 0.1px)
-AXIS_DOMINANCE    = 1.8    # 主导轴摆幅至少要是对另一轴的这么多倍(挡掉画圈)
-SHAKE_MIN_SWING   = 45     # 一次摆动的最小振幅(px) —— 必须真的"扫出去"
-SHAKE_PATH_RATIO  = 2.5    # 路径/振幅 —— 必须真的来回扫, 单向移动约等于 1
-
-# 灵敏度档位: 触控板用户抬手指会有停顿, 所以默认窗口比鼠标时代宽
-SHAKE_PROFILES = {
-    "low":    {"min_run": 16, "reversals": 3, "window": 0.45, "min_swing": 60},
-    "normal": {"min_run": SHAKE_MIN_RUN, "reversals": SHAKE_REVERSALS,
-               "window": SHAKE_WINDOW, "min_swing": SHAKE_MIN_SWING},
-    # 高灵敏只降"单程门槛", 不降折返次数 —— 次数少于 3 时历史不够,
-    # 主导轴判定会失效(画圈会被误判成晃动), 这个在测试里验证过。
-    "high":   {"min_run": 8,  "reversals": 3, "window": 1.30, "min_swing": 30},
-}
-SENSITIVITY_LABELS = {"low": "低(怕误触)", "normal": "标准", "high": "高(最好触发)"}
 POLL_SEC          = 0.008  # 鼠标采样间隔
 HIDE_SYSTEM_CUR   = True   # 是否隐藏系统原指针(False 会看到小箭头叠在大箭头里)
 OUTLINE_RATIO     = 0.08   # 白色描边宽度 / 箭头高度
@@ -390,142 +373,48 @@ def build_frame(scale, dpi, fill=(0, 0, 0)):
 
 # ============================ 摇动识别 ============================
 class AxisShake:
-    """单轴晃动识别 —— 判的是"运动的形状", 不是数小折返。
+    """单轴折返计数: 只有振幅足够大的反向才算一次折返。"""
 
-    一条折返只说明"转向了", 不能说明你在晃。真实误触长这样:
-
-        ▸ 移动光标时冲过头, 往回调 40px, 再继续 —— 3 次转向, 但它是在"赶路"
-        ▸ 12px 的小幅左右抖动 —— 3 次折返, 但根本没"扫"出去
-
-    所以在动作时间窗内, 除了折返次数, 还要看两个形状指标:
-
-        amplitude = 窗口内最高点 - 最低点        >= SHAKE_MIN_SWING(45px)
-        path / amplitude                         >= SHAKE_PATH_RATIO(2.5)
-
-    单向拖拽的 path/amplitude ≈ 1.0; 过冲修正 ≈ 1.2; 真的来回扫 ≈ 3 以上。
-    这样"来回扫"才成立, 而"一边走一边修正"和"原地小抖动"都被挡在外面。
-
-    另外两个从触控板实测来的关键点:
-      · 时间窗累计**动作时间**, 不是墙上时间 —— 抬手指的停顿不该吃掉窗口;
-      · 反向只要够 min_run 就算折返 —— 顶点停住后 leg 已归零, 不能要求"吃回整条腿"
-        (否则触控板滑四下只攒到一两次)。
-    """
-
-    def __init__(self, min_run, reversals=None, window=None, min_swing=None):
+    def __init__(self, min_run):
         self.min_run = min_run
-        self.need = reversals or SHAKE_REVERSALS
-        self.window = window or SHAKE_WINDOW
-        self.min_swing = min_swing or SHAKE_MIN_SWING
         self.dir = 0
-        self.leg = 0.0
-        self.back = 0.0
+        self.acc = 0.0
+        self.peak = 0.0
         self.revs = []
-        self.active = 0.0
-        self.idle = 0.0
-        self.swing = 0.0
-        self.pos = 0.0
-        self.samples = deque()
-        self.stats = (0.0, 0.0)     # (amplitude, path)
-        self.last_t = None
 
-    # ---------- 时间与样本 ----------
-    def _append(self, delta):
-        self.pos += delta
-        self.samples.append((self.active, self.pos))
-        cutoff = self.active - self.window - 0.25
-        while len(self.samples) > 2 and self.samples[0][0] < cutoff:
-            self.samples.popleft()
-
-    def _shape(self):
-        """窗口内的 (amplitude, path)。"""
-        if len(self.samples) < 2:
-            return 0.0, 0.0
-        lo = self.active - self.window
-        pts = [p for (t, p) in self.samples if t >= lo]
-        if len(pts) < 2:                     # 窗口内样本太少, 用最后两个
-            pts = [p for (_, p) in list(self.samples)[-2:]]
-        amp = max(pts) - min(pts)
-        path = 0.0
-        for i in range(len(pts) - 1):
-            path += abs(pts[i + 1] - pts[i])
-        return amp, path
-
-    # ---------- 主循环每帧调用 ----------
     def feed(self, t, delta):
-        dt = 0.0 if self.last_t is None else t - self.last_t
-        self.last_t = t
-        dt = max(0.0, min(0.05, dt))
-
-        if abs(delta) < MOVE_EPS:
-            self.idle += dt
-            if self.idle > PAUSE_BUDGET and self.dir:
-                self.reset(keep_timer=True)
+        if self.dir == 0:
+            if abs(delta) >= 1.0:
+                self.dir = 1 if delta > 0 else -1
+                self.acc = abs(delta)
+                self.peak = self.acc
             return False
-
-        self.active += dt
-        self.idle = 0.0
-        self._append(delta)
-        d = 1 if delta > 0 else -1
-
-        if self.dir == 0 or self.leg <= 0.0:
-            self.dir = d
-            self.leg = abs(delta)
-            self.back = 0.0
+        if (delta > 0) == (self.dir > 0):
+            self.acc += abs(delta)
+            if self.acc > self.peak:
+                self.peak = self.acc
             return False
-
-        if d == self.dir:
-            self.leg += abs(delta)
-            self.back = 0.0
+        self.acc -= abs(delta)
+        if self.acc > 0:
             return False
-
-        self.back += abs(delta)
-        if self.back < self.min_run:
-            return False
-
-        rev = self.leg >= self.min_run
-        if rev:
-            self.revs.append(self.active)
-            amp, path = self._shape()
-            self.stats = (amp, path)
-            if amp > self.swing:
-                self.swing = amp
-        self.dir = d
-        self.leg = self.back
-        self.back = 0.0
-        if rev:
-            self.revs = [x for x in self.revs if self.active - x <= self.window]
+        # 反向足够深 -> 记一次折返
+        rev = False
+        if self.peak >= self.min_run:
+            self.revs.append(t)
+            rev = True
+        self.dir = -self.dir
+        self.acc = -self.acc if self.acc < 0 else 0.0
+        self.peak = self.acc
+        self.revs = [x for x in self.revs if t - x <= SHAKE_WINDOW]
         return rev
 
     def hit(self):
-        if len(self.revs) < self.need:
-            return False
-        amp, path = self.stats
-        return amp >= self.min_swing and path >= SHAKE_PATH_RATIO * amp
+        return len(self.revs) >= SHAKE_REVERSALS
 
-    def reset(self, keep_timer=False):
+    def reset(self):
         self.revs = []
         self.dir = 0
-        self.leg = self.back = 0.0
-        self.swing = 0.0
-        self.idle = 0.0
-        self.pos = 0.0
-        self.samples.clear()
-        self.stats = (0.0, 0.0)
-        if not keep_timer:
-            self.active = 0.0
-            self.last_t = None
-
-
-def shake_is_linear(d0, d1):
-    """晃动应该基本沿一个方向来回 —— 主导轴的摆幅要显著大于另一个轴。
-
-    画圈时 x、y 都是正弦(只差 90 度相位), 单轴看和晃动几乎一样, 会误触发。
-    要求主导轴至少是对另一轴的 AXIS_DOMINANCE 倍, 就能把画圈挡掉,
-    代价是「斜着晃」不会被识别 —— 但真人几乎不会斜着晃鼠标。
-    """
-    hi = max(d0.swing, d1.swing)
-    lo = min(d0.swing, d1.swing)
-    return hi > 0.0 and lo * AXIS_DOMINANCE <= hi
+        self.acc = self.peak = 0.0
 
 
 # ============================ 指针隐藏 / 还原 ============================
@@ -611,7 +500,6 @@ DEFAULT_SETTINGS = {
     ],
     "process_whitelist": [],
     "log_suppressed": True,
-    "sensitivity": "normal",      # low / normal / high
     "appearance": {
         "scale": PEAK_SCALE,
         "color": "#000000"
@@ -910,24 +798,6 @@ class Scene:
             rgb_ = (0, 0, 0)
         return scale, rgb_
 
-    def sensitivity(self):
-        name = str((self.settings or {}).get("sensitivity", "normal")).strip().lower()
-        return name if name in SHAKE_PROFILES else "normal"
-
-    def set_sensitivity(self, name):
-        if name not in SHAKE_PROFILES:
-            return
-        data = dict(DEFAULT_SETTINGS)
-        if self.settings:
-            data.update(self.settings)
-        data["sensitivity"] = name
-        try:
-            with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            self.reload(force=True)
-        except Exception:
-            logging.warning("写入灵敏度失败", exc_info=True)
-
     def set_appearance(self, scale=None, color=None):
         """写回 settings.json 并立即重载。"""
         data = dict(DEFAULT_SETTINGS)
@@ -1057,8 +927,6 @@ WM_RBUTTONUP, WM_LBUTTONUP, WM_LBUTTONDBLCLK = 0x0205, 0x0202, 0x0203
 ID_STATUS, ID_PAUSE_1H, ID_PAUSE_FOREVER = 1, 2, 3
 ID_AUTOSTART, ID_BLOCK_FG, ID_SETTINGS, ID_LOG, ID_ABOUT, ID_QUIT = 4, 5, 6, 7, 8, 9
 ID_SIZE_BASE, ID_COLOR_BASE, ID_COLOR_CUSTOM = 100, 200, 299
-ID_SENS_BASE = 300
-SENS_ORDER = ["low", "normal", "high"]
 MF_POPUP = 0x0010
 SIZE_CHOICES = [1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0]
 COLOR_CHOICES = [
@@ -1387,13 +1255,6 @@ class Tray:
                                ID_COLOR_BASE + i, name)
         user32.AppendMenuW(color_menu, MF_SEPARATOR, 0, None)
         user32.AppendMenuW(color_menu, MF_STRING, ID_COLOR_CUSTOM, "自定义…")
-        sens_menu = user32.CreatePopupMenu()
-        cur_sens = sc.sensitivity()
-        for i, key in enumerate(SENS_ORDER):
-            user32.AppendMenuW(sens_menu,
-                               MF_STRING | (MF_CHECKED if key == cur_sens else 0),
-                               ID_SENS_BASE + i, SENSITIVITY_LABELS[key])
-        user32.AppendMenuW(menu, MF_POPUP, hval(sens_menu), "触发灵敏度")
         user32.AppendMenuW(menu, MF_POPUP, hval(size_menu), "放大倍数")
         user32.AppendMenuW(menu, MF_POPUP, hval(color_menu), "箭头颜色")
         user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
@@ -1458,13 +1319,6 @@ class Tray:
         elif cmd == ID_AUTOSTART:
             _set_autostart(_autostart_value() is None)
             self.refresh()
-        elif ID_SENS_BASE <= cmd < ID_SENS_BASE + len(SENS_ORDER):
-            sc.set_sensitivity(SENS_ORDER[cmd - ID_SENS_BASE])
-            changed = self.app.apply_sensitivity()
-            logging.info("灵敏度改为 %s", SENS_ORDER[cmd - ID_SENS_BASE])
-            if changed:
-                self.app.trigger(force=True)     # 闪一下说明改完了
-            self.refresh()
         elif ID_SIZE_BASE <= cmd < ID_SIZE_BASE + len(SIZE_CHOICES):
             sc.set_appearance(scale=SIZE_CHOICES[cmd - ID_SIZE_BASE])
             self.app.apply_appearance(preview=True)
@@ -1505,14 +1359,12 @@ class App:
         self.frames = []
         self.anim_t0 = None
         self.anim_total = GROW_SEC + HOLD_SEC + SHRINK_SEC
-        self.detectors = []          # 由 _make_detectors() 按灵敏度档位创建
+        self.detectors = [AxisShake(SHAKE_MIN_RUN), AxisShake(SHAKE_MIN_RUN)]
         self.last_trigger = 0.0
         self.last_pos = None
         self.hider = CursorHider(HIDE_SYSTEM_CUR)
         self.scene = Scene()
         self.scale, self.fill = self.scene.appearance()
-        self.sens_name = self.scene.sensitivity()
-        self._make_detectors()
         self._src_path = os.path.abspath(__file__)
         self._src_mtime = self._get_src_mtime()
         self._src_changed_at = None
@@ -1548,23 +1400,6 @@ class App:
         logging.info("预渲染 %d 帧, 耗时 %.0f ms, dpi=%.2f, 倍数=%.2f, 颜色=#%02X%02X%02X",
                      len(self.frames), (time.perf_counter() - t0) * 1000, self.dpi,
                      self.scale, self.fill[0], self.fill[1], self.fill[2])
-
-    def _make_detectors(self):
-        p = SHAKE_PROFILES.get(self.sens_name, SHAKE_PROFILES["normal"])
-        self.detectors = [AxisShake(p["min_run"], p["reversals"], p["window"]),
-                          AxisShake(p["min_run"], p["reversals"], p["window"])]
-        logging.info("摇动识别: %s (单程≥%dpx, %d次折返, 窗口%.2fs, 振幅≥%dpx)",
-                     self.sens_name, p["min_run"], p["reversals"], p["window"],
-                     p.get("min_swing", SHAKE_MIN_SWING))
-
-    def apply_sensitivity(self):
-        """档位变了就换检测器(不打断正在播放的动画)。"""
-        name = self.scene.sensitivity()
-        if name != self.sens_name:
-            self.sens_name = name
-            self._make_detectors()
-            return True
-        return False
 
     def _get_src_mtime(self):
         try:
@@ -1795,7 +1630,6 @@ class App:
                 self._app_check = now
                 if self.scene.appearance() != (self.scale, self.fill):
                     self.apply_appearance(preview=False)
-                self.apply_sensitivity()
             if self.pause_until and now >= self.pause_until:
                 self.pause_until = None
                 self.scene.paused = False
@@ -1808,8 +1642,7 @@ class App:
                     dx, dy = pos[0] - prev[0], pos[1] - prev[1]
                     rx = self.detectors[0].feed(now, dx)
                     ry = self.detectors[1].feed(now, dy)
-                    if (rx or ry) and (self.detectors[0].hit() or self.detectors[1].hit()) \
-                            and shake_is_linear(self.detectors[0], self.detectors[1]):
+                    if (rx or ry) and (self.detectors[0].hit() or self.detectors[1].hit()):
                         self.trigger()
                 prev = pos
             if self.anim_t0 is not None:

@@ -48,53 +48,15 @@ No installer, no admin rights, no services. To stop it, press `Ctrl + Alt + Q` o
 
 ## How the shake is detected
 
-**It judges the shape of the motion, not the number of reversals.** Counting direction
-changes alone is too weak — two everyday false positives:
+Not a simple distance threshold — each axis runs a small state machine that tracks **net
+displacement** and counts **direction reversals**:
 
-- moving the cursor, overshooting, correcting a little, carrying on: 3 direction changes,
-  but you are *travelling*
-- a 12 px wobble: enough reversals, but nothing was ever swept
+- a reversal only counts if the stroke before it was at least `SHAKE_MIN_RUN` (14 px) long
+- you need **3 reversals within 0.6 s** (about 1.5 back-and-forth wiggles)
+- in practice a deliberate shake fires in ~0.3 s
 
-So on top of the reversal count, two **shape metrics** are measured over the window:
-
-| Metric | Threshold | Meaning |
-| --- | --- | --- |
-| amplitude | ≥ 45 px | max − min position in the window — you actually swept somewhere |
-| path / amplitude | ≥ 2.5 | whether you came back |
-
-A monotone drag is ≈ **1.0**, an overshoot correction ≈ **1.2**, a real back-and-forth
-is **3+**. That ratio is the line between "shaking" and "travelling with corrections".
-
-Plus three more conditions: at least **3 reversals**, each confirmed by a 12 px opposite
-stroke; the window is **1 s of movement** (not wall clock) and a rest longer than 1.2 s
-ends the gesture; and the motion must be roughly along one axis (dominant ≥ 1.8× the
-other), which is what rules out circles.
-
-Slow drags, circles, a shaky hand, overshoot corrections and small wobbles all stay quiet.
-
-### Why "movement time", and why touchpads
-
-A touchpad gesture is *swipe → lift finger (150–300 ms of nothing) → swipe back*.
-Measuring the window on wall clock let the pause eat it, so four swipes accumulated one or
-two reversals. The window now advances only while the pointer moves.
-
-Also: the cursor comes to rest at the apex of every swipe, so the accumulated leg is
-already zero — a reversal therefore cannot require retracing the whole previous stroke,
-which is what the pre-1.4.0 code did and why touchpads barely worked.
-
-### Sensitivity
-
-Tray menu → **触发灵敏度** (or `sensitivity` in `settings.json`):
-
-| Level | Min stroke | Reversals | Window | Amplitude | For |
-| --- | --- | --- | --- | --- |
-| `low` | 16 px | 3 | 0.45 s | 60 px | you get false triggers, want only clear shakes |
-| `normal` | 12 px | 3 | 1.0 s | 45 px | default, works for mouse and touchpad |
-| `high` | 8 px | 3 | 1.3 s | 30 px | light fingers / small touchpad |
-
-All three keep **3 reversals** on purpose: at 2 the history is too short for the
-dominant-axis test and circles start firing again — that boundary is pinned by
-`tools/test_shake.py`.
+That means slow drags, drawing circles, a shaky hand or slowly swinging the mouse back and
+forth **do not** trigger it.
 
 ## Configuration
 
@@ -106,13 +68,9 @@ Open `shake_cursor.pyw` — the constants are at the top:
 | `GROW_SEC` | `0.13` | Grow duration |
 | `HOLD_SEC` | `0.72` | How long it stays big |
 | `SHRINK_SEC` | `0.26` | Shrink-back duration |
-| `SHAKE_MIN_RUN` | `12` | Minimum stroke length in px — raise it to make triggering harder |
-| `SHAKE_WINDOW` | `1.00` | Reversal window in **movement** seconds |
+| `SHAKE_MIN_RUN` | `14` | Minimum stroke length in px — raise it to make triggering harder |
+| `SHAKE_WINDOW` | `0.60` | Reversal counting window, seconds |
 | `SHAKE_REVERSALS` | `3` | Reversals required inside the window |
-| `PAUSE_BUDGET` | `1.20` | A rest longer than this ends the gesture (touchpad lift) |
-| `AXIS_DOMINANCE` | `1.8` | Dominant-axis ratio; below this it is treated as a circle |
-| `SHAKE_MIN_SWING` | `45` | Amplitude floor in px — kills small wobbles |
-| `SHAKE_PATH_RATIO` | `2.5` | Path/amplitude floor — kills travelling-with-corrections |
 | `HIDE_SYSTEM_CUR` | `True` | Hide the real cursor while overlaying (see below) |
 | `OUTLINE_RATIO` | `0.08` | White outline thickness, relative to arrow height |
 
@@ -136,7 +94,6 @@ chevron — drag it onto the taskbar if you want it always visible). Right-click
 | 暂停 1 小时 / 暂停（直到我恢复） | pause without touching the config |
 | 开机自启 | toggle the per-user run-at-login entry |
 | 当前程序不弹：xxx.exe | add the **currently focused program** to the blacklist with one click — no JSON editing |
-| 触发灵敏度 | low / normal / high — bump it if your touchpad swipes barely register |
 | 放大倍数 | 1.5× – 5× presets, applied instantly |
 | 箭头颜色 | black / white / neon green / amber / sky blue / magenta, plus **自定义…** which opens the native Windows colour picker |
 | 打开设置文件 / 查看日志 | straight into `settings.json` / the log |
@@ -233,7 +190,7 @@ if the app is not running.
 
 **Nothing happens when I shake.** Run `start-debug.bat` and watch the console — it prints every
 detected shake with its coordinates. If you only see "running" and never a trigger, shake
-harder/faster, or pick a different **触发灵敏度** level in the tray menu.
+harder/faster, or lower `SHAKE_MIN_RUN` / `SHAKE_REVERSALS` in `shake_cursor.pyw`.
 
 **"Python was not found".** Install Python 3.8+ from
 [python.org](https://www.python.org/downloads/) with "Add python.exe to PATH" checked.
