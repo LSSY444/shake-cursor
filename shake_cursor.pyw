@@ -30,8 +30,8 @@ from ctypes import (POINTER, Structure, byref, c_int, c_ssize_t, c_ubyte, c_uint
 from ctypes import wintypes as w
 
 # ============================ 可调参数 ============================
-__version__       = "1.2.0"   # 1.2.0: 托盘菜单; 1.1.0: 场景感知
-PEAK_SCALE        = 3.0    # 峰值放大倍数
+__version__       = "1.3.0"   # 1.3.0: 外观自定义; 1.2.0: 托盘菜单; 1.1.0: 场景感知
+PEAK_SCALE        = 3.0    # 默认峰值放大倍数(可在 settings.json 的 appearance.scale 覆盖)
 GROW_SEC          = 0.13   # 放大耗时(秒)
 HOLD_SEC          = 0.72   # 保持最大时长(秒)
 SHRINK_SEC        = 0.26   # 缩回耗时(秒)
@@ -53,6 +53,7 @@ gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 shell32 = ctypes.WinDLL("shell32", use_last_error=True)
 dwmapi = ctypes.WinDLL("dwmapi", use_last_error=True)
+comdlg32 = ctypes.WinDLL("comdlg32", use_last_error=True)
 
 WS_POPUP = 0x80000000
 WS_EX_LAYERED = 0x00080000
@@ -308,8 +309,8 @@ def _down(src_hdc, sw, sh, dst_hdc, dw, dh):
     gdi32.GdiFlush()
 
 
-def build_frame(scale, dpi):
-    """渲染 scale 倍大小的指针: 黑色实心 + 白色描边, 预乘 alpha。"""
+def build_frame(scale, dpi, fill=(0, 0, 0)):
+    """渲染 scale 倍大小的指针: 指定颜色实心 + 白色描边, 预乘 alpha。"""
     unit = scale * dpi
     outline = max(1.0, OUTLINE_RATIO * ARROW_H * unit)
     margin = int(math.ceil(outline)) + 2
@@ -338,16 +339,17 @@ def build_frame(scale, dpi):
         a = string_at(bits_t1, n * 4)
         b = string_at(bits_t2, n * 4)
         out = bytearray(n * 4)
+        fr_, fg_, fb_ = (max(0, min(255, int(v))) for v in fill)
         for i in range(n):
-            cov_a = a[i * 4]          # 白层覆盖度(蓝通道即亮度)
-            cov_b = b[i * 4]          # 黑层覆盖度
-            # 黑层叠在白层之上: premul = 255 * cov_a * (1 - cov_b)
-            premul = (cov_a * (255 - cov_b)) // 255
-            alpha = cov_b + premul           # alpha = cov_b + cov_a*(1-cov_b)
+            cov_a = a[i * 4]          # 描边层覆盖度(蓝通道即亮度)
+            cov_b = b[i * 4]          # 箭头实心层覆盖度
+            # 实心色叠在白描边之上, 逐通道预乘: pm = C*cov_b + 白*cov_a*(1-cov_b)
+            outline_pm = (cov_a * (255 - cov_b)) // 255
+            alpha = cov_b + outline_pm
             o = i * 4
-            out[o] = premul
-            out[o + 1] = premul
-            out[o + 2] = premul
+            out[o] = (fb_ * cov_b) // 255 + outline_pm          # B
+            out[o + 1] = (fg_ * cov_b) // 255 + outline_pm      # G
+            out[o + 2] = (fr_ * cov_b) // 255 + outline_pm      # R
             out[o + 3] = alpha
         memmove(bits_o, bytes(out), len(out))
         gdi32.GdiFlush()
@@ -469,7 +471,8 @@ def _ease_in_out(x):
 #   1. SHQueryUserNotificationState —— Windows 自己的"勿扰"状态(它就是靠这个压制通知的);
 #   2. 前台窗口是否铺满光标所在的那块显示器(兜底, 有些程序不更新系统状态);
 #   3. 进程黑白名单(用户可控, 白名单优先级最高)。
-SETTINGS_PATH = os.path.join(APP_DIR, "settings.json")
+SETTINGS_PATH = (os.environ.get("SHAKE_CURSOR_SETTINGS")
+                  or os.path.join(APP_DIR, "settings.json"))   # 测试可指向临时文件
 
 DEFAULT_SETTINGS = {
     "suppress_in": {
@@ -484,6 +487,10 @@ DEFAULT_SETTINGS = {
     ],
     "process_whitelist": [],
     "log_suppressed": True,
+    "appearance": {
+        "scale": PEAK_SCALE,
+        "color": "#000000"
+    },
 }
 
 QUNS_TEXT = {
@@ -761,6 +768,41 @@ class Scene:
             self._last_log[reason] = now
             logging.info("跳过放大: %s", reason)
 
+    def appearance(self):
+        """(放大倍数, (r,g,b)) —— 越界值一律收敛到安全范围。"""
+        a = (self.settings or {}).get("appearance") or {}
+        try:
+            scale = float(a.get("scale", 3.0))
+        except (TypeError, ValueError):
+            scale = 3.0
+        scale = max(1.5, min(6.0, scale))
+        hexs = str(a.get("color", "#000000")).strip().lstrip("#")
+        if len(hexs) == 3:
+            hexs = "".join(c * 2 for c in hexs)
+        try:
+            rgb_ = (int(hexs[0:2], 16), int(hexs[2:4], 16), int(hexs[4:6], 16))
+        except (ValueError, IndexError):
+            rgb_ = (0, 0, 0)
+        return scale, rgb_
+
+    def set_appearance(self, scale=None, color=None):
+        """写回 settings.json 并立即重载。"""
+        data = dict(DEFAULT_SETTINGS)
+        if self.settings:
+            data.update(self.settings)
+        app = dict(data.get("appearance") or {})
+        if scale is not None:
+            app["scale"] = round(float(scale), 2)
+        if color is not None:
+            app["color"] = "#%02X%02X%02X" % tuple(color)
+        data["appearance"] = app
+        try:
+            with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            self.reload(force=True)
+        except Exception:
+            logging.warning("写外观配置失败", exc_info=True)
+
     def set_flag(self, key, value=True):
         """往 settings.json 里写一个状态标记(不是配置项, 例如首次提示已展示)。"""
         data = dict(DEFAULT_SETTINGS)
@@ -867,6 +909,18 @@ WM_RBUTTONUP, WM_LBUTTONUP, WM_LBUTTONDBLCLK = 0x0205, 0x0202, 0x0203
 
 ID_STATUS, ID_PAUSE_1H, ID_PAUSE_FOREVER = 1, 2, 3
 ID_AUTOSTART, ID_BLOCK_FG, ID_SETTINGS, ID_LOG, ID_ABOUT, ID_QUIT = 4, 5, 6, 7, 8, 9
+ID_SIZE_BASE, ID_COLOR_BASE, ID_COLOR_CUSTOM = 100, 200, 299
+MF_POPUP = 0x0010
+SIZE_CHOICES = [1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0]
+COLOR_CHOICES = [
+    ("黑", (0x00, 0x00, 0x00)),
+    ("白", (0xFF, 0xFF, 0xFF)),
+    ("荧光绿", (0x39, 0xFF, 0x14)),
+    ("亮橙", (0xFF, 0x8C, 0x00)),
+    ("天蓝", (0x3A, 0xA8, 0xFF)),
+    ("品红", (0xFF, 0x3A, 0xC8)),
+]
+CC_RGBINIT, CC_FULLOPEN = 0x00000001, 0x00000002
 AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 AUTOSTART_NAME = "ShakeFindCursor"
 
@@ -909,9 +963,18 @@ def _proto_tray():
     user32.PostMessageW.argtypes = [w.HWND, w.UINT, w.WPARAM, w.LPARAM]
     user32.RegisterWindowMessageW.argtypes = [w.LPCWSTR]
     user32.RegisterWindowMessageW.restype = w.UINT
+    comdlg32.ChooseColorW.argtypes = [POINTER(CHOOSECOLORW)]
+    comdlg32.ChooseColorW.restype = w.BOOL
     gdi32.CreateBitmap.argtypes = [c_int, c_int, w.UINT, w.UINT, c_void_p]
     gdi32.CreateBitmap.restype = w.HANDLE
 
+
+def hval(h):
+    """把菜单/图标句柄转成 AppendMenuW 要的整数。"""
+    try:
+        return int(ctypes.cast(h, c_void_p).value or 0)
+    except Exception:
+        return 0
 
 def _autostart_value():
     import winreg
@@ -945,6 +1008,31 @@ def _set_autostart(on):
         logging.warning("写入开机自启失败", exc_info=True)
         return False
 
+
+class CHOOSECOLORW(Structure):
+    _fields_ = [("lStructSize", w.DWORD), ("hwndOwner", w.HWND),
+                ("hInstance", w.HANDLE), ("rgbResult", w.DWORD),
+                ("lpCustColors", POINTER(w.DWORD)), ("Flags", w.DWORD),
+                ("lCustData", c_ssize_t), ("lpfnHook", c_void_p),
+                ("lpTemplateName", w.LPCWSTR)]
+
+_CUST_COLORS = (w.DWORD * 16)()
+
+def pick_color(owner, rgb_):
+    """系统取色器; 返回 (r,g,b) 或 None。"""
+    try:
+        cc = CHOOSECOLORW()
+        cc.lStructSize = sizeof(CHOOSECOLORW)
+        cc.hwndOwner = owner
+        cc.rgbResult = rgb(rgb_[0], rgb_[1], rgb_[2])       # COLORREF = 0x00BBGGRR
+        cc.lpCustColors = _CUST_COLORS
+        cc.Flags = CC_RGBINIT | CC_FULLOPEN
+        if comdlg32.ChooseColorW(byref(cc)):
+            v = cc.rgbResult & 0xFFFFFF
+            return (v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF)
+    except Exception:
+        logging.warning("取色器打开失败", exc_info=True)
+    return None
 
 class _NoTray:
     """托盘不可用时的替身, 保证核心功能不受影响。"""
@@ -1088,6 +1176,22 @@ class Tray:
         auto = _autostart_value() is not None
         user32.AppendMenuW(menu, MF_STRING | (MF_CHECKED if auto else 0),
                            ID_AUTOSTART, "开机自启")
+
+        scale, color = sc.appearance()
+        size_menu = user32.CreatePopupMenu()
+        for i, v in enumerate(SIZE_CHOICES):
+            user32.AppendMenuW(size_menu,
+                               MF_STRING | (MF_CHECKED if abs(v - scale) < 0.01 else 0),
+                               ID_SIZE_BASE + i, "%.1f 倍" % v)
+        color_menu = user32.CreatePopupMenu()
+        for i, (name, rgbv) in enumerate(COLOR_CHOICES):
+            user32.AppendMenuW(color_menu,
+                               MF_STRING | (MF_CHECKED if tuple(rgbv) == tuple(color) else 0),
+                               ID_COLOR_BASE + i, name)
+        user32.AppendMenuW(color_menu, MF_SEPARATOR, 0, None)
+        user32.AppendMenuW(color_menu, MF_STRING, ID_COLOR_CUSTOM, "自定义…")
+        user32.AppendMenuW(menu, MF_POPUP, hval(size_menu), "放大倍数")
+        user32.AppendMenuW(menu, MF_POPUP, hval(color_menu), "箭头颜色")
         user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
 
         bl = [x.lower() for x in sc._blacklist]
@@ -1114,7 +1218,7 @@ class Tray:
         cmd = user32.TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
                                    pt.x, pt.y, 0, self.hwnd, None)
         user32.PostMessageW(self.hwnd, 0, 0, 0)
-        user32.DestroyMenu(menu)
+        user32.DestroyMenu(menu)          # 子菜单随父菜单一起释放
         if cmd:
             self.on_command(cmd, target)
 
@@ -1130,6 +1234,21 @@ class Tray:
         elif cmd == ID_AUTOSTART:
             _set_autostart(_autostart_value() is None)
             self.refresh()
+        elif ID_SIZE_BASE <= cmd < ID_SIZE_BASE + len(SIZE_CHOICES):
+            sc.set_appearance(scale=SIZE_CHOICES[cmd - ID_SIZE_BASE])
+            self.app.apply_appearance(preview=True)
+            self.refresh()
+        elif ID_COLOR_BASE <= cmd < ID_COLOR_BASE + len(COLOR_CHOICES):
+            sc.set_appearance(color=COLOR_CHOICES[cmd - ID_COLOR_BASE][1])
+            self.app.apply_appearance(preview=True)
+            self.refresh()
+        elif cmd == ID_COLOR_CUSTOM:
+            cur = sc.appearance()[1]
+            picked = pick_color(self.hwnd, cur)
+            if picked:
+                sc.set_appearance(color=picked)
+                self.app.apply_appearance(preview=True)
+                self.refresh()
         elif cmd == ID_BLOCK_FG:
             if target:
                 changed = sc.toggle_blacklist(target)
@@ -1160,6 +1279,8 @@ class App:
         self.last_pos = None
         self.hider = CursorHider(HIDE_SYSTEM_CUR)
         self.scene = Scene()
+        self.scale, self.fill = self.scene.appearance()
+        self._app_check = 0.0
         self.hwnd = None
         self._wndproc_ref = WNDPROC(self._wndproc)
         self._msg = MSG()
@@ -1181,13 +1302,28 @@ class App:
 
     # ---------- 预渲染 ----------
     def _build_frames(self):
-        steps = max(2, int(round((PEAK_SCALE - 1.0) / 0.1)) + 1)
+        self.frames = []
+        steps = max(2, int(round((self.scale - 1.0) / 0.1)) + 1)
         t0 = time.perf_counter()
         for i in range(steps):
-            s = 1.0 + (PEAK_SCALE - 1.0) * i / (steps - 1)
-            self.frames.append(build_frame(s, self.dpi))
-        logging.info("预渲染 %d 帧, 耗时 %.0f ms, dpi=%.2f",
-                     len(self.frames), (time.perf_counter() - t0) * 1000, self.dpi)
+            s = 1.0 + (self.scale - 1.0) * i / (steps - 1)
+            self.frames.append(build_frame(s, self.dpi, self.fill))
+        logging.info("预渲染 %d 帧, 耗时 %.0f ms, dpi=%.2f, 倍数=%.2f, 颜色=#%02X%02X%02X",
+                     len(self.frames), (time.perf_counter() - t0) * 1000, self.dpi,
+                     self.scale, self.fill[0], self.fill[1], self.fill[2])
+
+    def apply_appearance(self, preview=True):
+        """外观变了就重建帧; 变更(或 preview)时闪一下让用户看到效果。"""
+        want = self.scene.appearance()
+        changed = want != (self.scale, self.fill)
+        if changed:
+            self.scale, self.fill = want
+            self._build_frames()
+            logging.info("外观已更新: %.2f 倍 / #%02X%02X%02X",
+                         self.scale, self.fill[0], self.fill[1], self.fill[2])
+        if preview and not self.anim_t0:
+            self.trigger(force=True)
+        return changed
 
     def _frame_for(self, scale):
         best = self.frames[0]
@@ -1303,14 +1439,14 @@ class App:
 
         if el < GROW_SEC:
             k = _ease_out_cubic(el / GROW_SEC)
-            scale = 1.0 + (PEAK_SCALE - 1.0) * k
+            scale = 1.0 + (self.scale - 1.0) * k
             alpha = 255
         elif el < GROW_SEC + HOLD_SEC:
-            scale = PEAK_SCALE
+            scale = self.scale
             alpha = 255
         elif el < self.anim_total:
             k = (el - GROW_SEC - HOLD_SEC) / SHRINK_SEC
-            scale = PEAK_SCALE + (1.0 - PEAK_SCALE) * _ease_in_out(k)
+            scale = self.scale + (1.0 - self.scale) * _ease_in_out(k)
             fade = max(0.0, (k - 0.5) / 0.5)
             alpha = int(255 * (1.0 - fade))
         else:
@@ -1354,6 +1490,10 @@ class App:
                 if not self.running:
                     break
             now = time.perf_counter()
+            if now - self._app_check > 0.6:
+                self._app_check = now
+                if self.scene.appearance() != (self.scale, self.fill):
+                    self.apply_appearance(preview=False)
             if self.pause_until and now >= self.pause_until:
                 self.pause_until = None
                 self.scene.paused = False

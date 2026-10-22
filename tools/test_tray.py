@@ -31,6 +31,13 @@ user32.DestroyMenu.argtypes = [w.HANDLE]
 
 
 def load_app():
+    # 用临时配置, 别动用户真实的 settings.json
+    os.environ.setdefault("SHAKE_CURSOR_SETTINGS",
+                          os.path.join(os.environ.get("TEMP", "."), "sc_test_settings.json"))
+    try:
+        os.remove(os.environ["SHAKE_CURSOR_SETTINGS"])
+    except OSError:
+        pass
     spec = importlib.util.spec_from_file_location("sc", os.path.join(REPO, "shake_cursor.pyw"))
     m = importlib.util.module_from_spec(spec)
     sys.modules["sc"] = m

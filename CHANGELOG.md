@@ -10,6 +10,40 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## English
 
+### [1.3.0] — 2026-10-22
+
+**Custom appearance.** The arrow was always black and always 3×. Both are now
+yours to change, from the tray menu or `settings.json`.
+
+#### Added
+
+- **放大倍数** submenu: 1.5× / 2× / 2.5× / 3× / 3.5× / 4× / 5×, applied instantly.
+- **箭头颜色** submenu: black, white, neon green, amber, sky blue, magenta — plus
+  **自定义…**, which opens the native Windows colour picker (`ChooseColorW`), so
+  any RGB value is reachable without typing hex.
+- `settings.json` gains `appearance: { scale, color }`. `scale` is clamped to
+  1.5–6.0, `color` accepts `#RGB` or `#RRGGBB`, and bad values fall back to the
+  defaults instead of crashing.
+- Changing either value re-renders the frame cache (~40–160 ms; 21–41 frames depending on scale) and flashes the pointer once as confirmation.
+
+#### Notes on the rendering
+
+- The compositing step used to write the same grey value into R, G and B because
+  the fill was always black. It now composites the chosen colour **per channel**
+  against the white outline layer, so anti-aliased edges stay correct:
+  `premul = C·cov_fill + white·cov_outline·(1−cov_fill)`.
+- The white outline is kept for every fill colour — a dark arrow on a dark page
+  would otherwise vanish.
+
+#### Testing
+
+- `tools/test_appearance.py`: renders the arrow in three colours and asserts the
+  dominant opaque pixel is exactly that colour; checks clamping and garbage-input
+  fallback; asserts the frame cache actually changes length (21 → 41) when the
+  scale goes 3× → 5×; and reads the menu back to confirm both submenus exist.
+- Tests now point `SHAKE_CURSOR_SETTINGS` at a temp file, so running them no
+  longer overwrites your real `settings.json`.
+
 ### [1.2.0] — 2026-10-22
 
 **Tray menu.** Scene settings were only reachable by hand-editing `settings.json`,
@@ -122,6 +156,34 @@ First public release.
 ---
 
 ## 中文
+
+### [1.3.0] — 2026-10-22
+
+**外观自定义。** 以前箭头永远是黑的、永远 3 倍。现在这两项都归你管——托盘菜单能改，
+`settings.json` 也能改。
+
+#### 新增
+
+- **放大倍数** 子菜单：1.5× / 2× / 2.5× / 3× / 3.5× / 4× / 5×，点了立即生效。
+- **箭头颜色** 子菜单：黑、白、荧光绿、亮橙、天蓝、品红，外加 **自定义…**——
+  直接开 Windows 原生取色器（`ChooseColorW`），任何 RGB 都能选，不用手写十六进制。
+- `settings.json` 新增 `appearance: { scale, color }`。`scale` 收敛到 1.5–6.0，
+  `color` 支持 `#RGB` / `#RRGGBB`，非法值自动回退到默认，不会崩。
+- 改动后重建帧缓存（约 40–160 ms（按倍数 21–41 帧））并闪一次作为确认。
+
+#### 渲染上的说明
+
+- 合成那一步以前把同一个灰度值同时写进 R/G/B（因为实心永远是黑的）。
+  现在按**逐通道**把所选颜色与白描边层合成，抗锯齿边缘才正确：
+  `premul = C·填充覆盖度 + 白·描边覆盖度·(1−填充覆盖度)`。
+- 不管填充什么颜色，白描边都保留——否则深色箭头在深色页面上会消失。
+
+#### 测试
+
+- `tools/test_appearance.py`：用三种颜色渲染箭头，断言最大面积的不透明像素正好是该颜色；
+  验证越界收敛与坏值回退；断言倍数 3× → 5× 时帧数真的从 21 变 41；
+  再把菜单读回来确认两个子菜单都在。
+- 测试现在会把 `SHAKE_CURSOR_SETTINGS` 指向临时文件，跑测试不再覆盖你真实的 `settings.json`。
 
 ### [1.2.0] — 2026-10-22
 

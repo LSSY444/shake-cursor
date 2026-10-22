@@ -14,5 +14,10 @@
     "mstsc.exe"
   ],
   "process_whitelist": [],
-  "log_suppressed": true
+  "log_suppressed": true,
+  "appearance": {
+    "scale": 3.0,
+    "color": "#000000"
+  },
+  "tray_hint_shown": true
 }

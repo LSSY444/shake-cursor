@@ -64,7 +64,7 @@ Open `shake_cursor.pyw` — the constants are at the top:
 
 | Constant | Default | Meaning |
 | --- | --- | --- |
-| `PEAK_SCALE` | `3.0` | How much the pointer grows |
+| `PEAK_SCALE` | `3.0` | Default growth factor (overridden by `appearance.scale`) |
 | `GROW_SEC` | `0.13` | Grow duration |
 | `HOLD_SEC` | `0.72` | How long it stays big |
 | `SHRINK_SEC` | `0.26` | Shrink-back duration |
@@ -87,11 +87,27 @@ chevron — drag it onto the taskbar if you want it always visible). Right-click
 | 暂停 1 小时 / 暂停（直到我恢复） | pause without touching the config |
 | 开机自启 | toggle the per-user run-at-login entry |
 | 当前程序不弹：xxx.exe | add the **currently focused program** to the blacklist with one click — no JSON editing |
+| 放大倍数 | 1.5× – 5× presets, applied instantly |
+| 箭头颜色 | black / white / neon green / amber / sky blue / magenta, plus **自定义…** which opens the native Windows colour picker |
 | 打开设置文件 / 查看日志 | straight into `settings.json` / the log |
 | 关于 / GitHub | project page |
 
 Left double-click replays the effect. All of it is native `Shell_NotifyIcon` +
 a popup menu, so the zero-dependency promise still holds.
+
+### Appearance
+
+Both knobs also live in `settings.json`, so they survive restarts and can be
+scripted:
+
+```json
+"appearance": { "scale": 3.0, "color": "#000000" }
+```
+
+`scale` is clamped to 1.5–6.0. Changing either value re-renders the frame cache
+(~40–160 ms (21–41 frames, bigger scale = more frames and bigger bitmaps)) and flashes the pointer once so you can
+see the result. The arrow keeps its white outline regardless of the fill colour,
+so a dark arrow stays readable on a dark background.
 
 ## Scene awareness
 
