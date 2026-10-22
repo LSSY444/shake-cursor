@@ -1,0 +1,18 @@
+{
+  "suppress_in": {
+    "d3d_fullscreen": true,
+    "fullscreen_app": true,
+    "busy": true,
+    "presentation": true,
+    "locked": true
+  },
+  "process_blacklist": [
+    "game.exe",
+    "steam.exe",
+    "steamwebhelper.exe",
+    "obs64.exe",
+    "mstsc.exe"
+  ],
+  "process_whitelist": [],
+  "log_suppressed": true
+}

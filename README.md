@@ -43,6 +43,7 @@ No installer, no admin rights, no services. To stop it, press `Ctrl + Alt + Q` o
 | --- | --- |
 | *shake the mouse* | Enlarge the pointer |
 | `Ctrl + Alt + Space` | Trigger the effect manually |
+| `Ctrl + Alt + P` | Pause / resume (for things the app can't detect) |
 | `Ctrl + Alt + Q` | Quit |
 
 ## How the shake is detected
@@ -74,6 +75,55 @@ Open `shake_cursor.pyw` — the constants are at the top:
 | `OUTLINE_RATIO` | `0.08` | White outline thickness, relative to arrow height |
 
 Restart the app after editing.
+
+## Scene awareness
+
+Enlarging the pointer is the *last* thing you want mid-game, during a fullscreen
+video, or while presenting. Three layers are checked — but only at the moment a
+shake has already been detected, so the 125 Hz polling loop stays untouched:
+
+| Layer | Signal | What it catches |
+| --- | --- | --- |
+| 1 | `SHQueryUserNotificationState` | the API Windows itself uses to suppress notifications: `QUNS_RUNNING_D3D_FULL_SCREEN` = exclusive-fullscreen game, `QUNS_BUSY` = fullscreen app, `QUNS_PRESENTATION_MODE` = presenting |
+| 2 | foreground window covers a monitor | fallback for apps that don't update the system state; **maximized windows are excluded** (they only fill the work area) |
+| 3 | process black / white list | your own exemptions |
+
+Multi-monitor detail: if the fullscreen window sits on monitor A while the pointer
+is on monitor B, the effect still fires — you are not "inside" the fullscreen app.
+
+Configure it in `settings.json` (created next to the script on first run):
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `suppress_in.d3d_fullscreen` | `true` | skip exclusive-fullscreen games |
+| `suppress_in.fullscreen_app` | `true` | skip when the foreground window fills a monitor |
+| `suppress_in.busy` | `true` | skip while the shell reports "busy" (covers fullscreen video) |
+| `suppress_in.presentation` | `true` | skip in presentation / projector mode |
+| `suppress_in.locked` | `true` | skip while the session is locked |
+| `process_blacklist` | `game.exe, steam.exe, …` | never fire for these executables |
+| `process_whitelist` | `[]` | always fire for these, even fullscreen |
+
+The file is re-read when it changes — no restart needed. Whitelist beats blacklist.
+
+### "Why didn't it fire?"
+
+```bash
+python shake_cursor.pyw --why
+```
+
+prints every signal plus the verdict, so you can debug a game it failed to detect:
+
+```
+前台窗口: 0x001E028E
+  类名   : Chrome_WidgetWin_1
+  进程   : chrome.exe
+系统勿扰状态: 2 (全屏应用运行中或演示设置)
+前台窗口全屏: 是
+结论: 不放大 —— 全屏应用运行中
+```
+
+To switch the whole thing off temporarily: `Ctrl + Alt + P` (it flashes the
+pointer once so you can see it took effect).
 
 ## How it works
 

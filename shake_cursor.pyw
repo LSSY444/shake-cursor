@@ -17,6 +17,7 @@
 
 import atexit
 import ctypes
+import json
 import logging
 import math
 import os
@@ -29,6 +30,7 @@ from ctypes import (POINTER, Structure, byref, c_int, c_ssize_t, c_ubyte, c_uint
 from ctypes import wintypes as w
 
 # ============================ 可调参数 ============================
+__version__       = "1.1.0"   # 1.1.0: 场景感知(游戏/全屏/演示时不响应)
 PEAK_SCALE        = 3.0    # 峰值放大倍数
 GROW_SEC          = 0.13   # 放大耗时(秒)
 HOLD_SEC          = 0.72   # 保持最大时长(秒)
@@ -49,6 +51,8 @@ WATCHDOG_FLAG = "--watchdog"
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+dwmapi = ctypes.WinDLL("dwmapi", use_last_error=True)
 
 WS_POPUP = 0x80000000
 WS_EX_LAYERED = 0x00080000
@@ -458,6 +462,358 @@ def _ease_in_out(x):
     return x * x * (3.0 - 2.0 * x)
 
 
+
+# ============================ 场景感知 ============================
+# 打游戏 / 全屏看片 / 演示投影 时不该把指针变大, 否则挡住视野还抢注意力。
+# 三层信号, 从最准到兜底:
+#   1. SHQueryUserNotificationState —— Windows 自己的"勿扰"状态(它就是靠这个压制通知的);
+#   2. 前台窗口是否铺满光标所在的那块显示器(兜底, 有些程序不更新系统状态);
+#   3. 进程黑白名单(用户可控, 白名单优先级最高)。
+SETTINGS_PATH = os.path.join(APP_DIR, "settings.json")
+
+DEFAULT_SETTINGS = {
+    "suppress_in": {
+        "d3d_fullscreen": True,     # 独占全屏 D3D 应用(游戏)
+        "fullscreen_app": True,     # 前台全屏窗口(全屏视频 / 浏览器全屏 / 无边框全屏游戏)
+        "busy": True,               # 系统忙(全屏应用运行中或已应用演示设置)
+        "presentation": True,       # 演示 / 投影模式
+        "locked": True,             # 锁屏 / 用户不在
+    },
+    "process_blacklist": [
+        "game.exe", "steam.exe", "steamwebhelper.exe", "obs64.exe", "mstsc.exe",
+    ],
+    "process_whitelist": [],
+    "log_suppressed": True,
+}
+
+QUNS_TEXT = {
+    1: "用户不在/锁屏",
+    2: "全屏应用运行中或演示设置",
+    3: "独占全屏 D3D 应用",
+    4: "演示模式",
+    5: "正常(可接收通知)",
+    6: "静默时段",
+    7: "应用模式",
+}
+# 这些类名是桌面/任务栏, 覆盖全屏也不算"应用全屏"
+GWL_STYLE = -16
+WS_MAXIMIZE = 0x01000000
+
+DESKTOP_CLASSES = {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd",
+                   "TaskListThumbnailWnd", "ForegroundStaging"}
+
+
+class MONITORINFO(Structure):
+    _fields_ = [("cbSize", w.DWORD), ("rcMonitor", w.RECT),
+                ("rcWork", w.RECT), ("dwFlags", w.DWORD)]
+
+
+_SCENE_PROTO_DONE = False
+
+
+def _proto_scene():
+    global _SCENE_PROTO_DONE
+    if _SCENE_PROTO_DONE:
+        return
+    _SCENE_PROTO_DONE = True
+    shell32.SHQueryUserNotificationState.argtypes = [POINTER(c_int)]
+    shell32.SHQueryUserNotificationState.restype = ctypes.c_long
+    user32.GetForegroundWindow.restype = w.HWND
+    user32.GetWindowRect.argtypes = [w.HWND, POINTER(w.RECT)]
+    user32.GetClassNameW.argtypes = [w.HWND, w.LPWSTR, c_int]
+    user32.GetWindowTextW.argtypes = [w.HWND, w.LPWSTR, c_int]
+    user32.GetWindowThreadProcessId.argtypes = [w.HWND, POINTER(w.DWORD)]
+    user32.IsIconic.argtypes = [w.HWND]
+    user32.GetWindowLongW.argtypes = [w.HWND, c_int]
+    user32.GetWindowLongW.restype = ctypes.c_long
+    user32.IsWindowVisible.argtypes = [w.HWND]
+    user32.MonitorFromWindow.argtypes = [w.HWND, w.DWORD]
+    user32.MonitorFromWindow.restype = w.HMONITOR
+    user32.MonitorFromPoint.argtypes = [w.POINT, w.DWORD]
+    user32.MonitorFromPoint.restype = w.HMONITOR
+    user32.GetMonitorInfoW.argtypes = [w.HMONITOR, POINTER(MONITORINFO)]
+    user32.GetMonitorInfoW.restype = w.BOOL
+    kernel32.OpenProcess.argtypes = [w.DWORD, w.BOOL, w.DWORD]
+    kernel32.OpenProcess.restype = w.HANDLE
+    kernel32.QueryFullProcessImageNameW.argtypes = [w.HANDLE, w.DWORD, w.LPWSTR,
+                                                    POINTER(w.DWORD)]
+    kernel32.CloseHandle.argtypes = [w.HANDLE]
+    dwmapi.DwmGetWindowAttribute.argtypes = [w.HWND, w.DWORD, c_void_p, w.DWORD]
+    dwmapi.DwmGetWindowAttribute.restype = ctypes.c_long
+
+
+def query_user_state():
+    """SHQueryUserNotificationState: 5 = 正常, 其余都表示"别打扰用户"。"""
+    try:
+        v = c_int(0)
+        if shell32.SHQueryUserNotificationState(byref(v)) == 0:
+            return v.value
+    except Exception:
+        logging.debug("SHQueryUserNotificationState 失败", exc_info=True)
+    return 5
+
+
+def window_class(hwnd):
+    buf = ctypes.create_unicode_buffer(256)
+    user32.GetClassNameW(hwnd, buf, 256)
+    return buf.value
+
+
+def window_title(hwnd):
+    buf = ctypes.create_unicode_buffer(512)
+    user32.GetWindowTextW(hwnd, buf, 512)
+    return buf.value
+
+
+def window_process(hwnd):
+    pid = w.DWORD(0)
+    user32.GetWindowThreadProcessId(hwnd, byref(pid))
+    if not pid.value:
+        return ""
+    h = kernel32.OpenProcess(0x1000, False, pid.value)   # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return ""
+    try:
+        size = w.DWORD(1024)
+        buf = ctypes.create_unicode_buffer(1024)
+        if kernel32.QueryFullProcessImageNameW(h, 0, buf, byref(size)):
+            return os.path.basename(buf.value)
+    finally:
+        kernel32.CloseHandle(h)
+    return ""
+
+
+def window_rect(hwnd):
+    """优先用 DWM 的可见边框, 它对全屏窗口比 GetWindowRect 更准。"""
+    r = w.RECT()
+    if dwmapi.DwmGetWindowAttribute(hwnd, 9, byref(r), sizeof(r)) != 0:   # DWMWA_EXTENDED_FRAME_BOUNDS
+        if not user32.GetWindowRect(hwnd, byref(r)):
+            return None
+    return r
+
+
+def monitor_info(hm):
+    mi = MONITORINFO()
+    mi.cbSize = sizeof(MONITORINFO)
+    if not user32.GetMonitorInfoW(hm, byref(mi)):
+        return None
+    return mi
+
+
+def covers_monitor(rect, mi, ratio=0.99):
+    if rect is None or mi is None:
+        return False
+    mr = mi.rcMonitor
+    x0 = max(rect.left, mr.left)
+    y0 = max(rect.top, mr.top)
+    x1 = min(rect.right, mr.right)
+    y1 = min(rect.bottom, mr.bottom)
+    if x1 <= x0 or y1 <= y0:
+        return False
+    inter = (x1 - x0) * (y1 - y0)
+    total = max(1, (mr.right - mr.left) * (mr.bottom - mr.top))
+    return inter / float(total) >= ratio
+
+
+class Scene:
+    """判断"现在该不该放大指针"。只在摇动被识别后才查询, 热路径零开销。"""
+
+    CACHE_SEC = 0.25
+
+    def __init__(self):
+        _proto_scene()
+        self.settings = dict(DEFAULT_SETTINGS)
+        self._suppress = dict(DEFAULT_SETTINGS["suppress_in"])
+        self._blacklist = []
+        self._whitelist = []
+        self._mtime = None
+        self._cache_t = -1.0
+        self._cache = (False, "")
+        self._last_log = {}
+        self.paused = False
+        self.reload(force=True)
+
+    # ---------- 配置 ----------
+    def reload(self, force=False):
+        try:
+            mt = os.path.getmtime(SETTINGS_PATH)
+        except OSError:
+            mt = None
+        if not force and mt == self._mtime:
+            return
+        self._mtime = mt
+        data = {}
+        if mt is not None:
+            try:
+                with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                logging.warning("settings.json 解析失败, 使用默认配置", exc_info=True)
+                data = {}
+        else:
+            self._write_default()
+        sup = dict(DEFAULT_SETTINGS["suppress_in"])
+        sup.update({k: bool(v) for k, v in (data.get("suppress_in") or {}).items()
+                    if k in sup})
+        self._suppress = sup
+        self._blacklist = [str(x).strip().lower()
+                           for x in (data.get("process_blacklist")
+                                     or DEFAULT_SETTINGS["process_blacklist"]) if str(x).strip()]
+        self._whitelist = [str(x).strip().lower()
+                           for x in (data.get("process_whitelist") or []) if str(x).strip()]
+        self.settings = data
+        logging.info("场景配置已载入: 抑制=%s 黑名单=%d 白名单=%d",
+                     {k: v for k, v in sup.items() if v}, len(self._blacklist),
+                     len(self._whitelist))
+
+    def _write_default(self):
+        try:
+            with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+                json.dump(DEFAULT_SETTINGS, f, ensure_ascii=False, indent=2)
+            logging.info("已生成默认配置 %s", SETTINGS_PATH)
+        except Exception:
+            logging.warning("写入默认配置失败(不影响运行)", exc_info=True)
+
+    # ---------- 采样 ----------
+    def snapshot(self, pos=None, hwnd=None):
+        """hwnd=None 时取前台窗口; 传值则直接分析该窗口(测试/诊断用)。"""
+        _proto_scene()
+        if hwnd is None:
+            hwnd = user32.GetForegroundWindow()
+        info = {"hwnd": hwnd or 0, "cls": "", "title": "", "process": "",
+                "quns": query_user_state(), "fullscreen": False,
+                "fs_monitor": None, "cur_monitor": None, "same_monitor": None,
+                "rect": None, "mon": None}
+        if pos:
+            info["cur_monitor"] = user32.MonitorFromPoint(w.POINT(pos[0], pos[1]), 2)
+        if hwnd:
+            info["cls"] = window_class(hwnd)
+            info["title"] = window_title(hwnd)
+            info["process"] = window_process(hwnd)
+            style = user32.GetWindowLongW(hwnd, GWL_STYLE) or 0
+            # 最大化 ≠ 全屏: 它只铺满工作区, 底下还有任务栏
+            maximized = bool(style & WS_MAXIMIZE)
+            if info["cls"] not in DESKTOP_CLASSES and user32.IsWindowVisible(hwnd) \
+                    and not user32.IsIconic(hwnd) and not maximized:
+                hm = user32.MonitorFromWindow(hwnd, 2)      # MONITOR_DEFAULTTONEAREST
+                mi = monitor_info(hm)
+                rect = window_rect(hwnd)
+                if covers_monitor(rect, mi):
+                    info["fullscreen"] = True
+                    info["fs_monitor"] = hm
+                    info["rect"] = rect
+                    info["mon"] = mi
+            if info["fullscreen"] and info["cur_monitor"]:
+                info["same_monitor"] = (info["cur_monitor"] == info["fs_monitor"])
+        return info
+
+    # ---------- 判定 ----------
+    def decide(self, pos=None, use_cache=True):
+        now = time.perf_counter()
+        if use_cache and now - self._cache_t < self.CACHE_SEC:
+            return self._cache
+
+        self.reload()
+        if self.paused:
+            result = (True, "已暂停(Ctrl+Alt+P)")
+        else:
+            snap = self.snapshot(pos)
+            exe = (snap["process"] or "").lower()
+            sup = self._suppress
+            if exe and exe in self._whitelist:
+                result = (False, "白名单进程: " + exe)
+            elif exe and exe in self._blacklist:
+                result = (True, "黑名单进程: " + exe)
+            elif snap["quns"] == 3 and sup["d3d_fullscreen"]:
+                result = (True, "独占全屏游戏 (D3D)")
+            elif snap["quns"] == 4 and sup["presentation"]:
+                result = (True, "演示/投影模式")
+            elif snap["quns"] == 2 and sup["busy"]:
+                result = (True, "全屏应用运行中")
+            elif snap["quns"] == 1 and sup["locked"]:
+                result = (True, "锁屏/用户不在")
+            elif snap["fullscreen"] and sup["fullscreen_app"]:
+                if snap["same_monitor"] is False:
+                    result = (False, "全屏窗口在另一块屏, 光标不在那里")
+                else:
+                    r = snap["rect"]
+                    result = (True, "前台全屏窗口 %dx%d" % (r.right - r.left, r.bottom - r.top))
+            else:
+                result = (False, "正常")
+        self._cache_t = now
+        self._cache = result
+        return result
+
+    def allows(self, pos=None):
+        suppress, reason = self.decide(pos)
+        if suppress and self._suppress_log_enabled():
+            self._log_throttled(reason)
+        return not suppress
+
+    def _suppress_log_enabled(self):
+        sup = (self.settings.get("log_suppressed") if self.settings else None)
+        return True if sup is None else bool(sup)
+
+    def _log_throttled(self, reason):
+        now = time.perf_counter()
+        last = self._last_log.get(reason, 0.0)
+        if now - last > 5.0:
+            self._last_log[reason] = now
+            logging.info("跳过放大: %s", reason)
+
+    def toggle_pause(self):
+        self.paused = not self.paused
+        self._cache_t = -1.0
+        logging.info("已%s (Ctrl+Alt+P)", "暂停" if self.paused else "恢复")
+        return self.paused
+
+
+def scene_report():
+    """--why: 把判定依据全部打印出来, 方便用户自查"为什么游戏里还是弹"。"""
+    _proto_scene()
+    sc = Scene()
+    cx = user32.GetSystemMetrics(0) // 2
+    cy = user32.GetSystemMetrics(1) // 2
+    snap = sc.snapshot((cx, cy))
+    ok, reason = sc.decide((cx, cy), use_cache=False)
+
+    lines = []
+    lines.append("shake-cursor v%s  场景判定报告" % __version__)
+    lines.append("配置文件: %s" % SETTINGS_PATH)
+    lines.append("  %s" % ("(不存在, 已按默认生成)" if sc._mtime is None else "(已载入)"))
+    lines.append("")
+    lines.append("前台窗口: 0x%08X" % (snap["hwnd"] or 0))
+    lines.append("  类名   : %s" % (snap["cls"] or "-"))
+    lines.append("  标题   : %s" % ((snap["title"] or "-")[:60]))
+    lines.append("  进程   : %s" % (snap["process"] or "-"))
+    lines.append("")
+    q = snap["quns"]
+    lines.append("系统勿扰状态: %d (%s)" % (q, QUNS_TEXT.get(q, "未知")))
+    for key, label in (("d3d_fullscreen", "独占全屏 D3D 视为场景"),
+                       ("fullscreen_app", "全屏窗口视为场景"),
+                       ("busy", "系统忙视为场景"),
+                       ("presentation", "演示模式视为场景")):
+        lines.append("  %-16s : %s" % (label, "开" if sc._suppress.get(key) else "关"))
+    lines.append("")
+    lines.append("前台窗口全屏: %s" % ("是" if snap["fullscreen"] else "否"))
+    if snap["fullscreen"]:
+        r = snap["rect"]
+        lines.append("  窗口矩形 : (%d,%d)-(%d,%d)  %dx%d"
+                     % (r.left, r.top, r.right, r.bottom, r.right - r.left, r.bottom - r.top))
+        lines.append("  光标同屏 : %s" % {True: "是", False: "否", None: "未知"}[snap["same_monitor"]])
+    lines.append("")
+    lines.append("黑白名单: 黑 %s | 白 %s"
+                 % (", ".join(sc._blacklist) or "空", ", ".join(sc._whitelist) or "空"))
+    if sc.paused:
+        lines.append("暂停状态: 已暂停(Ctrl+Alt+P)")
+    lines.append("")
+    lines.append("结论: %s —— %s" % ("不放大" if ok else "正常放大", reason))
+    out = "\n".join(lines)
+    print(out)
+    logging.info("--why 报告:\n%s", out)
+    return 0
+
+
 class App:
     CLASS_NAME = "ShakeFindCursorWnd"
 
@@ -472,6 +828,7 @@ class App:
         self.last_trigger = 0.0
         self.last_pos = None
         self.hider = CursorHider(HIDE_SYSTEM_CUR)
+        self.scene = Scene()
         self.hwnd = None
         self._wndproc_ref = WNDPROC(self._wndproc)
         self._msg = MSG()
@@ -503,6 +860,9 @@ class App:
                 self.quit()
             elif wp == 2:
                 self.trigger(force=True)
+            elif wp == 3:
+                self.scene.toggle_pause()
+                self.trigger(force=True)      # 用一次放大作为"收到了"的反馈
             return 0
         if msg in (WM_DESTROY, WM_ENDSESSION):
             self.hider.restore()
@@ -533,6 +893,8 @@ class App:
             logging.warning("热键 Ctrl+Alt+Q 注册失败(可能被其它程序占用)")
         if not user32.RegisterHotKey(self.hwnd, 2, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 0x20):
             logging.warning("热键 Ctrl+Alt+Space 注册失败(可能被其它程序占用)")
+        if not user32.RegisterHotKey(self.hwnd, 3, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, ord("P")):
+            logging.warning("热键 Ctrl+Alt+P 注册失败(可能被其它程序占用)")
 
     # ---------- 绘制 ----------
     def _paint(self, frame, x, y, alpha):
@@ -558,6 +920,11 @@ class App:
             return
         pos = self._cursor_pos()
         if not pos:
+            return
+        # 打游戏 / 全屏看片 / 演示投影 时不弹; 手动热键(force)不受限制
+        if not force and not self.scene.allows(pos):
+            self.detectors[0].reset()
+            self.detectors[1].reset()
             return
         self.last_trigger = now
         self.anim_t0 = now
@@ -760,6 +1127,8 @@ def main():
     except Exception:
         pass
 
+    if "--why" in sys.argv:
+        return scene_report()
     if "--selftest" in sys.argv:
         return selftest()
     if "--preview" in sys.argv:
@@ -774,7 +1143,8 @@ def main():
     global _WATCHDOG
     _WATCHDOG = spawn_watchdog()      # 必须保留引用, 否则 Popen 被回收 -> 管道关闭 -> 看门狗提前退出
     app = App()
-    logging.info("运行中 pid=%d: 晃动鼠标试试 | Ctrl+Alt+Space 演示 | Ctrl+Alt+Q 退出", os.getpid())
+    logging.info("运行中 pid=%d: 晃动鼠标试试 | Ctrl+Alt+Space 演示 | Ctrl+Alt+P 暂停/恢复 | Ctrl+Alt+Q 退出", os.getpid())
+    logging.info("场景感知: 全屏/游戏/演示时自动不响应; 配置见 settings.json")
     try:
         app.run()
     finally:

@@ -42,6 +42,7 @@ macOS 一直有这个功能。Windows 的「辅助功能 → 鼠标指针大小�
 | --- | --- |
 | *晃动鼠标* | 放大指针 |
 | `Ctrl + Alt + Space` | 手动触发一次 |
+| `Ctrl + Alt + P` | 暂停 / 恢复（应对程序识别不了的场景） |
 | `Ctrl + Alt + Q` | 退出 |
 
 ## 怎么判断你在「晃」
@@ -71,6 +72,52 @@ macOS 一直有这个功能。Windows 的「辅助功能 → 鼠标指针大小�
 | `OUTLINE_RATIO` | `0.08` | 白描边粗细（相对箭头高度） |
 
 改完保存，退出程序重新启动生效。
+
+## 场景感知
+
+打游戏、全屏看片、投屏演示的时候，指针突然变大是最烦的——挡视野、还抢注意力。
+所以在「已经识别到摇动、即将播放动画」的那一刻做三层判断（125Hz 轮询主循环完全不受影响）：
+
+| 层 | 信号 | 能识别什么 |
+| --- | --- | --- |
+| 1 | `SHQueryUserNotificationState` | Windows 自己压制通知用的那个 API：`QUNS_RUNNING_D3D_FULL_SCREEN` = 独占全屏游戏，`QUNS_BUSY` = 有全屏应用在跑，`QUNS_PRESENTATION_MODE` = 演示中 |
+| 2 | 前台窗口是否铺满显示器 | 兜底，专治"不更新系统状态"的程序；**最大化窗口不算**（它只铺满工作区） |
+| 3 | 进程黑名单 / 白名单 | 你自己的例外清单 |
+
+多屏细节：全屏窗口在 A 屏、光标在 B 屏时**照常放大**——你并不在那个全屏应用里面。
+
+配置在 `settings.json`（首次运行自动生成在同目录）：
+
+| 键 | 默认 | 含义 |
+| --- | --- | --- |
+| `suppress_in.d3d_fullscreen` | `true` | 独占全屏游戏不响应 |
+| `suppress_in.fullscreen_app` | `true` | 前台窗口铺满显示器时不响应 |
+| `suppress_in.busy` | `true` | 系统报"忙"时不响应（覆盖全屏视频） |
+| `suppress_in.presentation` | `true` | 演示 / 投影模式不响应 |
+| `suppress_in.locked` | `true` | 锁屏时不响应 |
+| `process_blacklist` | `game.exe, steam.exe, …` | 这些进程一律不响应 |
+| `process_whitelist` | `[]` | 这些进程即使在游戏里也响应 |
+
+文件改动后**自动重载**，不用重启；白名单优先于黑名单。
+
+### 为什么没弹出来？
+
+```bash
+python shake_cursor.pyw --why
+```
+
+会把所有判据和最终结论都打出来，方便自查"我那个游戏为什么没被识别"：
+
+```
+前台窗口: 0x001E028E
+  类名   : Chrome_WidgetWin_1
+  进程   : chrome.exe
+系统勿扰状态: 2 (全屏应用运行中或演示设置)
+前台窗口全屏: 是
+结论: 不放大 —— 全屏应用运行中
+```
+
+想临时整个关掉：`Ctrl + Alt + P`（会弹一次放大作为"收到了"的反馈）。
 
 ## 实现原理
 
