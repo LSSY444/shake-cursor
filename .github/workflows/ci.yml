@@ -12,12 +12,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      # One python process compiles everything, so its exit code governs the step.
+      # (A multi-line pwsh run block only reports the LAST command's exit code,
+      #  which silently swallowed failures before.)
       - name: Byte-compile every Python entry point
-        run: |
-          python -m py_compile shake_cursor.pyw
-          python -m py_compile autostart.py
-          python -m py_compile stop.py
-          python -m py_compile tools/make_preview.py
-          python -m py_compile tools/publish.py
+        run: >
+          python -c "import py_compile,sys;
+          [py_compile.compile(f, doraise=True) for f in sys.argv[1:]]"
+          shake_cursor.pyw autostart.py stop.py
+          tools/make_demo.py tools/publish.py tools/test_scene.py
+
+      - name: settings.json keeps the documented shape
+        run: >
+          python -c "import json,pathlib;
+          d=json.loads(pathlib.Path('settings.json').read_text(encoding='utf-8'));
+          assert {'suppress_in','process_blacklist','process_whitelist'} <= set(d), d"
+
       - name: Autostart helper prints its status without touching the registry
         run: python autostart.py status
