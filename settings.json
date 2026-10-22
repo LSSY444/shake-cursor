@@ -15,7 +15,7 @@
   ],
   "process_whitelist": [],
   "log_suppressed": true,
-  "sensitivity": "low",
+  "sensitivity": "normal",
   "appearance": {
     "scale": 3.0,
     "color": "#000000"
