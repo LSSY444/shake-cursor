@@ -1517,7 +1517,7 @@ def main():
     global _WATCHDOG
     _WATCHDOG = spawn_watchdog()      # 必须保留引用, 否则 Popen 被回收 -> 管道关闭 -> 看门狗提前退出
     app = App()
-    logging.info("运行中 pid=%d: 晃动鼠标试试 | Ctrl+Alt+Space 演示 | Ctrl+Alt+P 暂停/恢复 | Ctrl+Alt+Q 退出", os.getpid())
+    logging.info("shake-cursor v%s 运行中 pid=%d: 晃动鼠标试试 | Ctrl+Alt+Space 演示 | Ctrl+Alt+P 暂停/恢复 | Ctrl+Alt+Q 退出", __version__, os.getpid())
     logging.info("场景感知: 全屏/游戏/演示时自动不响应; 配置见 settings.json")
     logging.info("托盘菜单: 右键托盘图标可暂停/开机自启/按程序排除")
     try:
