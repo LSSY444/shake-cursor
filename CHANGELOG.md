@@ -10,6 +10,42 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## English
 
+### [1.2.0] — 2026-10-22
+
+**Tray menu.** Scene settings were only reachable by hand-editing `settings.json`,
+which nobody does. The app now has a notification-area icon with a native popup
+menu — still zero dependencies (`Shell_NotifyIcon` + `CreatePopupMenu`).
+
+#### Added
+
+- **Tray icon with a menu**:
+  - status line — what it is doing right now and *why* it is skipping
+  - `暂停 1 小时` / `暂停（直到我恢复）`
+  - `开机自启` (checkbox, reads the real registry state)
+  - **`当前程序不弹：xxx.exe`** — one click adds the currently focused program to
+    the blacklist; clicking again removes it. This is the "learning mode" without
+    a learning UI.
+  - open `settings.json` / open the log / project page / quit
+- **First-run balloon** — Windows 11 tucks new tray icons into the `^` overflow,
+  so a one-time tip tells people where the menu lives. Shown once, tracked by a
+  `tray_hint_shown` flag in the config.
+- **Explorer restart recovery** — listens for `TaskbarCreated` and re-adds the
+  icon, so a crashed explorer does not make the app unreachable until reboot.
+- **`tools/test_tray.py`** — headless test: builds the real menu and reads the
+  item texts back through `GetMenuStringW`, then exercises the pause flag and the
+  blacklist toggle. No UI is shown, so it runs anywhere.
+
+#### Fixed
+
+- The tray status line and tooltip reported suppression **inverted**
+  (`decide()` returns `(suppress, reason)`, not `(ok, reason)`), so a normally
+  working app claimed "skipped: normal". Caught by the new headless test.
+
+#### Upgrade
+
+Drop-in. Existing `settings.json` keeps working; `tray_hint_shown` is added on
+first launch of this version.
+
 ### [1.1.0] — 2026-10-22
 
 **Scene awareness.** The pointer no longer grows while you are gaming, watching
@@ -86,6 +122,35 @@ First public release.
 ---
 
 ## 中文
+
+### [1.2.0] — 2026-10-22
+
+**托盘菜单。** 之前的场景配置只能手改 `settings.json`——没人会去改。现在有了通知区图标
+和原生右键菜单，依然是零依赖（`Shell_NotifyIcon` + `CreatePopupMenu`）。
+
+#### 新增
+
+- **托盘图标 + 菜单**：
+  - 状态行 —— 当前在做什么、**为什么跳过**
+  - `暂停 1 小时` / `暂停（直到我恢复）`
+  - `开机自启`（勾选状态读的是真实注册表）
+  - **`当前程序不弹：xxx.exe`** —— 一键把当前前台程序加进黑名单，再点一次移除。
+    这相当于"学习模式"，但不需要任何额外界面。
+  - 打开 `settings.json` / 查看日志 / 项目主页 / 退出
+- **首次运行气泡提示** —— Windows 11 会把新托盘图标折叠进 `^` 里，
+  所以第一次启动会弹一条提示告诉用户菜单在哪（只弹一次，配置里记 `tray_hint_shown`）。
+- **资源管理器重启后自动恢复图标** —— 监听 `TaskbarCreated`，explorer 崩了重建也不会让应用失联。
+- **`tools/test_tray.py`** —— 无头测试：真的构建菜单并用 `GetMenuStringW` 把条目读回来核对，
+  再验证暂停标记和黑名单切换；不弹任何 UI，任何环境都能跑。
+
+#### 修复
+
+- 托盘状态行和提示文本把"是否抑制"**写反了**（`decide()` 返回的是 `(是否抑制, 原因)`，
+  不是 `(ok, 原因)`），导致一切正常时显示"跳过 · 正常"。由新增的无头测试发现。
+
+#### 升级
+
+直接替换。已有 `settings.json` 继续有效；本版首次启动会补上 `tray_hint_shown`。
 
 ### [1.1.0] — 2026-10-22
 

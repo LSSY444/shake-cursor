@@ -30,7 +30,7 @@ from ctypes import (POINTER, Structure, byref, c_int, c_ssize_t, c_ubyte, c_uint
 from ctypes import wintypes as w
 
 # ============================ 可调参数 ============================
-__version__       = "1.1.0"   # 1.1.0: 场景感知(游戏/全屏/演示时不响应)
+__version__       = "1.2.0"   # 1.2.0: 托盘菜单; 1.1.0: 场景感知
 PEAK_SCALE        = 3.0    # 峰值放大倍数
 GROW_SEC          = 0.13   # 放大耗时(秒)
 HOLD_SEC          = 0.72   # 保持最大时长(秒)
@@ -761,6 +761,46 @@ class Scene:
             self._last_log[reason] = now
             logging.info("跳过放大: %s", reason)
 
+    def set_flag(self, key, value=True):
+        """往 settings.json 里写一个状态标记(不是配置项, 例如首次提示已展示)。"""
+        data = dict(DEFAULT_SETTINGS)
+        if self.settings:
+            data.update(self.settings)
+        data[key] = value
+        try:
+            with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            self.reload(force=True)
+        except Exception:
+            logging.debug("写入标记 %s 失败", key, exc_info=True)
+
+    def toggle_blacklist(self, exe):
+        """把某个进程加入/移出黑名单, 返回 True=已加入, False=已移除, None=失败。"""
+        exe = (exe or "").strip().lower()
+        if not exe:
+            return None
+        try:
+            with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = dict(DEFAULT_SETTINGS)
+        bl = [str(x).strip().lower() for x in (data.get("process_blacklist") or [])]
+        if exe in bl:
+            bl.remove(exe)
+            added = False
+        else:
+            bl.append(exe)
+            added = True
+        data["process_blacklist"] = bl
+        try:
+            with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            logging.warning("写黑名单失败", exc_info=True)
+            return None
+        self.reload(force=True)
+        return added
+
     def toggle_pause(self):
         self.paused = not self.paused
         self._cache_t = -1.0
@@ -775,7 +815,7 @@ def scene_report():
     cx = user32.GetSystemMetrics(0) // 2
     cy = user32.GetSystemMetrics(1) // 2
     snap = sc.snapshot((cx, cy))
-    ok, reason = sc.decide((cx, cy), use_cache=False)
+    suppress, reason = sc.decide((cx, cy), use_cache=False)
 
     lines = []
     lines.append("shake-cursor v%s  场景判定报告" % __version__)
@@ -807,11 +847,279 @@ def scene_report():
     if sc.paused:
         lines.append("暂停状态: 已暂停(Ctrl+Alt+P)")
     lines.append("")
-    lines.append("结论: %s —— %s" % ("不放大" if ok else "正常放大", reason))
+    lines.append("结论: %s —— %s" % ("不放大" if suppress else "正常放大", reason))
     out = "\n".join(lines)
     print(out)
     logging.info("--why 报告:\n%s", out)
     return 0
+
+
+
+# ============================ 托盘菜单 ============================
+# 纯 Shell_NotifyIcon + 原生弹出菜单, 依然零依赖。
+NIM_ADD, NIM_MODIFY, NIM_DELETE = 0, 1, 2
+NIF_MESSAGE, NIF_ICON, NIF_TIP, NIF_INFO = 1, 2, 4, 16
+NIIF_INFO = 0x00000001
+WM_TRAY = 0x8000 + 1
+MF_STRING, MF_CHECKED, MF_GRAYED, MF_SEPARATOR = 0x0000, 0x0008, 0x0001, 0x0800
+TPM_RIGHTBUTTON, TPM_RETURNCMD, TPM_NONOTIFY = 0x0002, 0x0100, 0x0080
+WM_RBUTTONUP, WM_LBUTTONUP, WM_LBUTTONDBLCLK = 0x0205, 0x0202, 0x0203
+
+ID_STATUS, ID_PAUSE_1H, ID_PAUSE_FOREVER = 1, 2, 3
+ID_AUTOSTART, ID_BLOCK_FG, ID_SETTINGS, ID_LOG, ID_ABOUT, ID_QUIT = 4, 5, 6, 7, 8, 9
+AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+AUTOSTART_NAME = "ShakeFindCursor"
+
+
+class NOTIFYICONDATAW(Structure):
+    _fields_ = [("cbSize", w.DWORD), ("hWnd", w.HWND), ("uID", w.UINT),
+                ("uFlags", w.UINT), ("uCallbackMessage", w.UINT), ("hIcon", w.HANDLE),
+                ("szTip", ctypes.c_wchar * 128), ("dwState", w.DWORD),
+                ("dwStateMask", w.DWORD), ("szInfo", ctypes.c_wchar * 256),
+                ("uVersion", w.UINT), ("szInfoTitle", ctypes.c_wchar * 64),
+                ("dwInfoFlags", w.DWORD), ("guidItem", ctypes.c_byte * 16),
+                ("hBalloonIcon", w.HANDLE)]
+
+
+class ICONINFO(Structure):
+    _fields_ = [("fIcon", w.BOOL), ("xHotspot", w.DWORD), ("yHotspot", w.DWORD),
+                ("hbmMask", w.HANDLE), ("hbmColor", w.HANDLE)]
+
+
+_TRAY_PROTO = False
+
+
+def _proto_tray():
+    global _TRAY_PROTO
+    if _TRAY_PROTO:
+        return
+    _TRAY_PROTO = True
+    shell32.Shell_NotifyIconW.argtypes = [w.DWORD, POINTER(NOTIFYICONDATAW)]
+    shell32.Shell_NotifyIconW.restype = w.BOOL
+    user32.CreateIconIndirect.argtypes = [POINTER(ICONINFO)]
+    user32.CreateIconIndirect.restype = w.HANDLE
+    user32.DestroyIcon.argtypes = [w.HANDLE]
+    user32.CreatePopupMenu.restype = w.HANDLE
+    user32.AppendMenuW.argtypes = [w.HANDLE, w.UINT, c_ssize_t, w.LPCWSTR]
+    user32.TrackPopupMenu.argtypes = [w.HANDLE, w.UINT, c_int, c_int, c_int, w.HWND, c_void_p]
+    user32.TrackPopupMenu.restype = c_int
+    user32.DestroyMenu.argtypes = [w.HANDLE]
+    user32.SetForegroundWindow.argtypes = [w.HWND]
+    user32.GetCursorPos.argtypes = [POINTER(w.POINT)]
+    user32.PostMessageW.argtypes = [w.HWND, w.UINT, w.WPARAM, w.LPARAM]
+    user32.RegisterWindowMessageW.argtypes = [w.LPCWSTR]
+    user32.RegisterWindowMessageW.restype = w.UINT
+    gdi32.CreateBitmap.argtypes = [c_int, c_int, w.UINT, w.UINT, c_void_p]
+    gdi32.CreateBitmap.restype = w.HANDLE
+
+
+def _autostart_value():
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY) as k:
+            return winreg.QueryValueEx(k, AUTOSTART_NAME)[0]
+    except OSError:
+        return None
+
+
+def _set_autostart(on):
+    import winreg
+    try:
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0,
+                                winreg.KEY_SET_VALUE) as k:
+            if on:
+                exe = sys.executable
+                if not exe.lower().endswith("pythonw.exe"):
+                    cand = os.path.join(os.path.dirname(exe), "pythonw.exe")
+                    if os.path.exists(cand):
+                        exe = cand
+                cmd = '"%s" -X utf8 "%s"' % (exe, os.path.abspath(__file__))
+                winreg.SetValueEx(k, AUTOSTART_NAME, 0, winreg.REG_SZ, cmd)
+            else:
+                try:
+                    winreg.DeleteValue(k, AUTOSTART_NAME)
+                except OSError:
+                    pass
+        return True
+    except OSError:
+        logging.warning("写入开机自启失败", exc_info=True)
+        return False
+
+
+class Tray:
+    """系统托盘图标 + 右键菜单。"""
+
+    def __init__(self, app):
+        _proto_tray()
+        self.app = app
+        self.hwnd = app.hwnd
+        self.hicon = self._make_icon()
+        self.added = False
+        self.taskbar_created = user32.RegisterWindowMessageW("TaskbarCreated")
+        self.add()
+
+    # ---------- 图标 ----------
+    def _make_icon(self):
+        """用程序自己的箭头位图做图标, 和效果保持一致。"""
+        try:
+            fr = build_frame(1.0, max(1.0, self.app.dpi * 1.1))
+            ii = ICONINFO()
+            ii.fIcon = True
+            ii.hbmColor = fr.hbmp
+            ii.hbmMask = gdi32.CreateBitmap(fr.w, fr.h, 1, 1, None)
+            icon = user32.CreateIconIndirect(byref(ii))
+            if icon:
+                return icon
+        except Exception:
+            logging.warning("生成托盘图标失败, 改用默认图标", exc_info=True)
+        return user32.LoadIconW(None, w.LPCWSTR(32512))      # IDI_APPLICATION
+
+    def add(self):
+        nid = NOTIFYICONDATAW()
+        nid.cbSize = sizeof(NOTIFYICONDATAW)
+        nid.hWnd = self.hwnd
+        nid.uID = 1
+        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
+        nid.uCallbackMessage = WM_TRAY
+        nid.hIcon = self.hicon
+        nid.szTip = self.tooltip()
+        self.added = bool(shell32.Shell_NotifyIconW(NIM_ADD, byref(nid)))
+        logging.info("托盘图标%s" % ("已创建" if self.added else "创建失败"))
+
+    def remove(self):
+        if not self.added:
+            return
+        nid = NOTIFYICONDATAW()
+        nid.cbSize = sizeof(NOTIFYICONDATAW)
+        nid.hWnd = self.hwnd
+        nid.uID = 1
+        shell32.Shell_NotifyIconW(NIM_DELETE, byref(nid))
+        self.added = False
+
+    def tooltip(self):
+        try:
+            suppress, reason = self.app.scene.decide(None, use_cache=False)
+        except Exception:
+            return "摇一摇找鼠标"
+        if self.app.scene.paused:
+            return "摇一摇找鼠标 · 已暂停"
+        if suppress:
+            return ("摇一摇找鼠标 · 已跳过: " + reason)[:120]
+        return "摇一摇找鼠标 · 正常响应"
+
+    def balloon(self, title, text):
+        """首次运行提示一下图标在哪 —— Win11 默认把新托盘图标折叠进 ^ 里。"""
+        if not self.added:
+            return
+        nid = NOTIFYICONDATAW()
+        nid.cbSize = sizeof(NOTIFYICONDATAW)
+        nid.hWnd = self.hwnd
+        nid.uID = 1
+        nid.uFlags = NIF_INFO
+        nid.szInfoTitle = title[:63]
+        nid.szInfo = text[:255]
+        nid.dwInfoFlags = NIIF_INFO
+        shell32.Shell_NotifyIconW(NIM_MODIFY, byref(nid))
+
+    def refresh(self):
+        if not self.added:
+            return
+        nid = NOTIFYICONDATAW()
+        nid.cbSize = sizeof(NOTIFYICONDATAW)
+        nid.hWnd = self.hwnd
+        nid.uID = 1
+        nid.uFlags = NIF_TIP
+        nid.szTip = self.tooltip()
+        shell32.Shell_NotifyIconW(NIM_MODIFY, byref(nid))
+
+    # ---------- 菜单 ----------
+    def _fg_target(self):
+        """菜单打开前记下前台程序, 作为"当前程序不弹"的目标。"""
+        try:
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd or hwnd == self.hwnd:
+                return ""
+            return window_process(hwnd) or ""
+        except Exception:
+            return ""
+
+    def build_menu(self, target):
+        sc = self.app.scene
+        suppress, reason = sc.decide(None, use_cache=False)
+        if sc.paused:
+            status = "状态：已暂停"
+        elif suppress:
+            status = ("状态：跳过 · " + reason)[:60]
+        else:
+            status = "状态：正常响应"
+
+        menu = user32.CreatePopupMenu()
+        user32.AppendMenuW(menu, MF_STRING | MF_GRAYED, ID_STATUS, "摇一摇找鼠标  v%s" % __version__)
+        user32.AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, status)
+        user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
+
+        user32.AppendMenuW(menu, MF_STRING, ID_PAUSE_1H, "暂停 1 小时")
+        user32.AppendMenuW(menu, MF_STRING | (MF_CHECKED if sc.paused else 0),
+                           ID_PAUSE_FOREVER, "暂停（直到我恢复）")
+
+        auto = _autostart_value() is not None
+        user32.AppendMenuW(menu, MF_STRING | (MF_CHECKED if auto else 0),
+                           ID_AUTOSTART, "开机自启")
+        user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
+
+        bl = [x.lower() for x in sc._blacklist]
+        if target and target.lower() not in ("explorer.exe", os.path.basename(sys.executable).lower()):
+            flag = MF_STRING | (MF_CHECKED if target.lower() in bl else 0)
+            user32.AppendMenuW(menu, flag, ID_BLOCK_FG, "当前程序不弹：%s" % target)
+        else:
+            user32.AppendMenuW(menu, MF_STRING | MF_GRAYED, ID_BLOCK_FG,
+                               "当前程序不弹（切到目标程序再打开菜单）")
+        user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
+        user32.AppendMenuW(menu, MF_STRING, ID_SETTINGS, "打开设置文件")
+        user32.AppendMenuW(menu, MF_STRING, ID_LOG, "查看日志")
+        user32.AppendMenuW(menu, MF_STRING, ID_ABOUT, "关于 / GitHub")
+        user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
+        user32.AppendMenuW(menu, MF_STRING, ID_QUIT, "退出")
+        return menu
+
+    def show_menu(self):
+        target = self._fg_target()
+        menu = self.build_menu(target)
+        pt = w.POINT()
+        user32.GetCursorPos(byref(pt))
+        user32.SetForegroundWindow(self.hwnd)      # 否则点菜单外面不会自动关闭
+        cmd = user32.TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+                                   pt.x, pt.y, 0, self.hwnd, None)
+        user32.PostMessageW(self.hwnd, 0, 0, 0)
+        user32.DestroyMenu(menu)
+        if cmd:
+            self.on_command(cmd, target)
+
+    def on_command(self, cmd, target):
+        sc = self.app.scene
+        if cmd == ID_PAUSE_1H:
+            self.app.pause_for(3600)
+            self.refresh()
+        elif cmd == ID_PAUSE_FOREVER:
+            sc.toggle_pause()
+            self.app.pause_until = None
+            self.refresh()
+        elif cmd == ID_AUTOSTART:
+            _set_autostart(_autostart_value() is None)
+            self.refresh()
+        elif cmd == ID_BLOCK_FG:
+            if target:
+                changed = sc.toggle_blacklist(target)
+                logging.info("黑名单%s: %s", "已加入" if changed else "已移除", target)
+            self.refresh()
+        elif cmd == ID_SETTINGS:
+            os.startfile(SETTINGS_PATH)
+        elif cmd == ID_LOG:
+            os.startfile(LOG_PATH)
+        elif cmd == ID_ABOUT:
+            os.startfile("https://github.com/LSSY444/shake-cursor")
+        elif cmd == ID_QUIT:
+            self.app.quit()
 
 
 class App:
@@ -833,8 +1141,16 @@ class App:
         self._wndproc_ref = WNDPROC(self._wndproc)
         self._msg = MSG()
         self._last_frame = None
+        self.pause_until = None
         self._build_frames()
         self._create_window()
+        self.tray = Tray(self)
+        if not self.scene.settings.get("tray_hint_shown"):
+            self.tray.balloon(
+                "摇一摇找鼠标 已就绪",
+                "图标在任务栏右下角(可能在 ^ 折叠区里)。" +
+                "右键它可暂停、设开机自启、或让某个程序不弹。")
+            self.scene.set_flag("tray_hint_shown", True)
 
     # ---------- 预渲染 ----------
     def _build_frames(self):
@@ -872,6 +1188,20 @@ class App:
         if msg == WM_CLOSE:
             self.quit()
             return 0
+        tray = getattr(self, "tray", None)
+        if tray is not None:
+            if msg == WM_TRAY:
+                if lp == WM_LBUTTONDBLCLK:
+                    self.trigger(force=True)
+                else:
+                    tray.show_menu()
+                return 0
+            if msg == tray.taskbar_created and tray.taskbar_created:
+                # 资源管理器重启后托盘图标会消失, 重新挂上
+                logging.info("检测到资源管理器重启, 重新添加托盘图标")
+                tray.added = False
+                tray.add()
+                return 0
         return user32.DefWindowProcW(hwnd, msg, wp, lp)
 
     def _create_window(self):
@@ -968,7 +1298,18 @@ class App:
         self.hider.restore()        # 先还原真指针, 再隐藏叠加层, 避免出现"指针消失一帧"
         user32.ShowWindow(self.hwnd, SW_HIDE)
 
+    def pause_for(self, seconds):
+        self.scene.paused = True
+        self.scene._cache_t = -1.0
+        self.pause_until = time.perf_counter() + seconds
+        logging.info("已暂停 %d 秒", seconds)
+        self.tray.refresh()
+
     def quit(self):
+        try:
+            getattr(self, "tray", None) and self.tray.remove()
+        except Exception:
+            pass
         self._finish()
         self.hider.restore()
         self.running = False
@@ -986,6 +1327,12 @@ class App:
                 if not self.running:
                     break
             now = time.perf_counter()
+            if self.pause_until and now >= self.pause_until:
+                self.pause_until = None
+                self.scene.paused = False
+                self.scene._cache_t = -1.0
+                logging.info("暂停时间到, 已恢复响应")
+                self.tray.refresh()
             pos = self._cursor_pos()
             if pos:
                 if self.anim_t0 is None and prev is not None:
@@ -1145,6 +1492,7 @@ def main():
     app = App()
     logging.info("运行中 pid=%d: 晃动鼠标试试 | Ctrl+Alt+Space 演示 | Ctrl+Alt+P 暂停/恢复 | Ctrl+Alt+Q 退出", os.getpid())
     logging.info("场景感知: 全屏/游戏/演示时自动不响应; 配置见 settings.json")
+    logging.info("托盘菜单: 右键托盘图标可暂停/开机自启/按程序排除")
     try:
         app.run()
     finally:

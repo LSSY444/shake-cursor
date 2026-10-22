@@ -76,6 +76,23 @@ Open `shake_cursor.pyw` — the constants are at the top:
 
 Restart the app after editing.
 
+## Tray menu
+
+The icon lives in the notification area (Windows 11 hides new icons under the **^**
+chevron — drag it onto the taskbar if you want it always visible). Right-click it:
+
+| Item | What it does |
+| --- | --- |
+| status line | what the app is doing right now, and *why* it is skipping |
+| 暂停 1 小时 / 暂停（直到我恢复） | pause without touching the config |
+| 开机自启 | toggle the per-user run-at-login entry |
+| 当前程序不弹：xxx.exe | add the **currently focused program** to the blacklist with one click — no JSON editing |
+| 打开设置文件 / 查看日志 | straight into `settings.json` / the log |
+| 关于 / GitHub | project page |
+
+Left double-click replays the effect. All of it is native `Shell_NotifyIcon` +
+a popup menu, so the zero-dependency promise still holds.
+
 ## Scene awareness
 
 Enlarging the pointer is the *last* thing you want mid-game, during a fullscreen
