@@ -194,4 +194,4 @@ python shake_cursor.pyw --why
 
 [MIT](LICENSE)，随便用、随便改、随便发布。
 
-更新记录见 [CHANGELOG.md](CHANGELOG.md)。
+更新记录见 [CHANGELOG.md](CHANGELOG.md)，设计与踩坑笔记见 [docs/PROJECT.md](docs/PROJECT.md)。

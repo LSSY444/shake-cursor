@@ -214,7 +214,7 @@ memory. Quit (`Ctrl + Alt + Q`) and start again.
 
 [MIT](LICENSE). Use it, fork it, ship it.
 
-Release notes: [CHANGELOG.md](CHANGELOG.md)
+Release notes: [CHANGELOG.md](CHANGELOG.md) · Design notes, architecture and pitfalls: [docs/PROJECT.md](docs/PROJECT.md) (中文)
 
 ---
 
