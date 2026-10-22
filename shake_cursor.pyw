@@ -30,7 +30,7 @@ from ctypes import (POINTER, Structure, byref, c_int, c_ssize_t, c_ubyte, c_uint
 from ctypes import wintypes as w
 
 # ============================ 可调参数 ============================
-__version__       = "1.3.0"   # 1.3.0: 外观自定义; 1.2.0: 托盘菜单; 1.1.0: 场景感知
+__version__       = "1.3.1"   # 1.3.1: 修托盘交互 + 自动重启; 1.3.0: 外观自定义
 PEAK_SCALE        = 3.0    # 默认峰值放大倍数(可在 settings.json 的 appearance.scale 覆盖)
 GROW_SEC          = 0.13   # 放大耗时(秒)
 HOLD_SEC          = 0.72   # 保持最大时长(秒)
@@ -64,6 +64,7 @@ WS_EX_NOACTIVATE = 0x08000000
 SW_HIDE = 0
 SW_SHOWNOACTIVATE = 4
 ULW_ALPHA = 0x00000002
+LWA_ALPHA = 0x00000002
 AC_SRC_OVER = 0x00
 AC_SRC_ALPHA = 0x01
 SRCCOPY = 0x00CC0020
@@ -88,6 +89,11 @@ MOD_CONTROL = 0x0002
 MOD_NOREPEAT = 0x4000
 LOGPIXELSY = 90
 CREATE_NO_WINDOW = 0x08000000
+DETACHED_PROCESS = 0x00000008
+CREATE_NEW_PROCESS_GROUP = 0x00000200
+SYNCHRONIZE = 0x00100000
+RELOAD_STABLE_SEC = 1.5      # 文件改动后等这么久没有新改动才重启
+RELOAD_POLL_SEC = 1.0        # 多久检查一次源文件时间戳
 DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
 
 # 经典 Windows 箭头形状, 热点在 (0,0), 外框 12 x 20
@@ -208,6 +214,10 @@ def _proto():
     gdi32.CreateBitmap.argtypes = [c_int, c_int, w.UINT, w.UINT, c_void_p]
     gdi32.CreateBitmap.restype = w.HBITMAP
     gdi32.GdiFlush.argtypes = []
+    kernel32.OpenProcess.argtypes = [w.DWORD, w.BOOL, w.DWORD]
+    kernel32.OpenProcess.restype = w.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [w.HANDLE, w.DWORD]
+    kernel32.WaitForSingleObject.restype = w.DWORD
     gdi32.GetDeviceCaps.argtypes = [w.HDC, c_int]
     gdi32.GetDeviceCaps.restype = c_int
 
@@ -963,6 +973,12 @@ def _proto_tray():
     user32.PostMessageW.argtypes = [w.HWND, w.UINT, w.WPARAM, w.LPARAM]
     user32.RegisterWindowMessageW.argtypes = [w.LPCWSTR]
     user32.RegisterWindowMessageW.restype = w.UINT
+    user32.SetLayeredWindowAttributes.argtypes = [w.HWND, w.DWORD, c_ubyte, w.DWORD]
+    user32.DestroyWindow.argtypes = [w.HWND]
+    user32.GetWindowThreadProcessId.argtypes = [w.HWND, POINTER(w.DWORD)]
+    user32.GetWindowThreadProcessId.restype = w.DWORD
+    user32.AttachThreadInput.argtypes = [w.DWORD, w.DWORD, w.BOOL]
+    kernel32.GetCurrentThreadId.restype = w.DWORD
     comdlg32.ChooseColorW.argtypes = [POINTER(CHOOSECOLORW)]
     comdlg32.ChooseColorW.restype = w.BOOL
     gdi32.CreateBitmap.argtypes = [c_int, c_int, w.UINT, w.UINT, c_void_p]
@@ -1034,6 +1050,40 @@ def pick_color(owner, rgb_):
         logging.warning("取色器打开失败", exc_info=True)
     return None
 
+class MenuOwner:
+    """专门用来"拥有"弹出菜单的窗口。
+
+    我们的叠加窗口带 WS_EX_NOACTIVATE, 永远拿不到前台, 而 TrackPopupMenu 要求
+    拥有者是前台窗口 —— 否则点菜单外面它不会关闭。所以另开一个 1x1 的全透明
+    窗口来当所有者: 它可以被 SetForegroundWindow 激活, 且看不见。
+    """
+
+    CLASS = "ShakeFindCursorMenuOwner"
+
+    def __init__(self):
+        _proto_tray()
+        self.hwnd = None
+        self._proc_ref = WNDPROC(lambda h, m, wp, lp: user32.DefWindowProcW(h, m, wp, int(lp)))
+        hinst = kernel32.GetModuleHandleW(None)
+        wc = WNDCLASSEXW()
+        wc.cbSize = sizeof(WNDCLASSEXW)
+        wc.lpfnWndProc = self._proc_ref
+        wc.hInstance = hinst
+        wc.lpszClassName = self.CLASS
+        user32.RegisterClassExW(byref(wc))
+        ex = WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TOPMOST
+        self.hwnd = user32.CreateWindowExW(ex, self.CLASS, "", WS_POPUP,
+                                           -32000, -32000, 1, 1,
+                                           None, None, hinst, None)
+        if self.hwnd:
+            user32.SetLayeredWindowAttributes(self.hwnd, 0, 0, LWA_ALPHA)
+            user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
+
+    def destroy(self):
+        if self.hwnd:
+            user32.DestroyWindow(self.hwnd)
+            self.hwnd = None
+
 class _NoTray:
     """托盘不可用时的替身, 保证核心功能不受影响。"""
     added = False
@@ -1063,6 +1113,12 @@ class Tray:
         self.hwnd = app.hwnd
         self.hicon = self._make_icon()
         self.added = False
+        self._menu_open = False
+        self.owner = None
+        try:
+            self.owner = MenuOwner()
+        except Exception:
+            logging.warning("菜单所有者窗口创建失败, 菜单可能无法自动关闭", exc_info=True)
         self.taskbar_created = user32.RegisterWindowMessageW("TaskbarCreated")
         self.add()
 
@@ -1098,6 +1154,8 @@ class Tray:
         logging.info("托盘图标%s" % ("已创建" if self.added else "创建失败"))
 
     def remove(self):
+        if self.owner:
+            self.owner.destroy()
         if not self.added:
             return
         nid = NOTIFYICONDATAW()
@@ -1210,15 +1268,35 @@ class Tray:
         return menu
 
     def show_menu(self):
+        if self._menu_open:                     # 防重入: 菜单是模态的, 再进来会嵌套
+            return
         target = self._fg_target()
         menu = self.build_menu(target)
         pt = w.POINT()
         user32.GetCursorPos(byref(pt))
-        user32.SetForegroundWindow(self.hwnd)      # 否则点菜单外面不会自动关闭
-        cmd = user32.TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
-                                   pt.x, pt.y, 0, self.hwnd, None)
-        user32.PostMessageW(self.hwnd, 0, 0, 0)
-        user32.DestroyMenu(menu)          # 子菜单随父菜单一起释放
+        owner = (self.owner.hwnd if self.owner and self.owner.hwnd else self.hwnd)
+        self._menu_open = True
+        cmd = 0
+        attached = False
+        tid_me = kernel32.GetCurrentThreadId()
+        try:
+            # 前台锁: 我们的进程通常不是前台, 直接 SetForegroundWindow 会被拒绝,
+            # 于是菜单点外面关不掉。先挂到当前前台线程的输入队列上再抢。
+            fg = user32.GetForegroundWindow()
+            tid_fg = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+            if tid_fg and tid_fg != tid_me:
+                attached = bool(user32.AttachThreadInput(tid_me, tid_fg, True))
+            user32.SetForegroundWindow(owner)
+            if user32.GetForegroundWindow() != owner:
+                logging.info("未能取得前台, 菜单可能无法点击外部关闭")
+            cmd = user32.TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+                                       pt.x, pt.y, 0, owner, None)
+            user32.PostMessageW(owner, 0, 0, 0)
+        finally:
+            if attached:
+                user32.AttachThreadInput(tid_me, tid_fg, False)
+            self._menu_open = False
+            user32.DestroyMenu(menu)          # 子菜单随父菜单一起释放
         if cmd:
             self.on_command(cmd, target)
 
@@ -1280,6 +1358,10 @@ class App:
         self.hider = CursorHider(HIDE_SYSTEM_CUR)
         self.scene = Scene()
         self.scale, self.fill = self.scene.appearance()
+        self._src_path = os.path.abspath(__file__)
+        self._src_mtime = self._get_src_mtime()
+        self._src_changed_at = None
+        self._src_checked = 0.0
         self._app_check = 0.0
         self.hwnd = None
         self._wndproc_ref = WNDPROC(self._wndproc)
@@ -1311,6 +1393,48 @@ class App:
         logging.info("预渲染 %d 帧, 耗时 %.0f ms, dpi=%.2f, 倍数=%.2f, 颜色=#%02X%02X%02X",
                      len(self.frames), (time.perf_counter() - t0) * 1000, self.dpi,
                      self.scale, self.fill[0], self.fill[1], self.fill[2])
+
+    def _get_src_mtime(self):
+        try:
+            return os.path.getmtime(self._src_path)
+        except OSError:
+            return None
+
+    def reload_if_updated(self, now):
+        """源文件被换掉(比如更新到新版本)就自动重启, 用户不用手动重开。"""
+        if now - self._src_checked < RELOAD_POLL_SEC:
+            return False
+        self._src_checked = now
+        mtime = self._get_src_mtime()
+        if mtime is None or mtime == self._src_mtime:
+            return False
+        if self._src_changed_at is None:
+            self._src_changed_at = now
+            logging.info("检测到程序文件已更新, 稍后自动重启")
+            return False
+        if now - self._src_changed_at < RELOAD_STABLE_SEC:
+            return False
+        self._src_mtime = mtime
+        self._src_changed_at = None
+        self.relaunch()
+        return True
+
+    def relaunch(self):
+        """起一个新实例, 让它等本进程退出后再接管(避免抢单实例锁)。"""
+        try:
+            exe = sys.executable
+            if not exe.lower().endswith("pythonw.exe"):
+                cand = os.path.join(os.path.dirname(exe), "pythonw.exe")
+                if os.path.exists(cand):
+                    exe = cand
+            subprocess.Popen([exe, "-X", "utf8", self._src_path,
+                              "--wait-pid", str(os.getpid())],
+                             close_fds=True,
+                             creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+            logging.info("已启动新实例, 本进程退出")
+        except Exception:
+            logging.warning("自动重启失败, 请手动重开", exc_info=True)
+        self.quit()
 
     def apply_appearance(self, preview=True):
         """外观变了就重建帧; 变更(或 preview)时闪一下让用户看到效果。"""
@@ -1354,10 +1478,13 @@ class App:
         tray = getattr(self, "tray", None)
         if tray is not None:
             if msg == WM_TRAY:
-                if lp == WM_LBUTTONDBLCLK:
-                    self.trigger(force=True)
-                else:
+                # 托盘回调不只「点击」: 鼠标划过会发 WM_MOUSEMOVE, 双击还会发一堆
+                # WM_LBUTTONDOWN/UP。以前「不是双击就弹菜单」, 结果是鼠标一靠近
+                # 图标菜单就自己出来, 而且菜单打开期间又收到鼠标消息 -> 嵌套菜单关不掉。
+                if lp == WM_RBUTTONUP:
                     tray.show_menu()
+                elif lp == WM_LBUTTONDBLCLK:
+                    self.trigger(force=True)
                 return 0
             if msg == tray.taskbar_created and tray.taskbar_created:
                 # 资源管理器重启后托盘图标会消失, 重新挂上
@@ -1490,6 +1617,8 @@ class App:
                 if not self.running:
                     break
             now = time.perf_counter()
+            if self.reload_if_updated(now):
+                return
             if now - self._app_check > 0.6:
                 self._app_check = now
                 if self.scene.appearance() != (self.scale, self.fill):
@@ -1517,6 +1646,19 @@ class App:
 
 
 # ============================ 看门狗 ============================
+def wait_pid_exit(pid, timeout=10.0):
+    """等某个进程退出(最多 timeout 秒), 用于自动重启时避免抢单实例锁。"""
+    try:
+        h = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+    except Exception:
+        return
+    if not h:
+        return
+    try:
+        kernel32.WaitForSingleObject(h, int(timeout * 1000))
+    finally:
+        kernel32.CloseHandle(h)
+
 def spawn_watchdog():
     """子进程守着 stdin 管道; 主进程不论怎么死, 管道关闭后它都会还原指针。"""
     try:
@@ -1641,6 +1783,11 @@ def main():
     except Exception:
         pass
 
+    if "--wait-pid" in sys.argv:
+        try:
+            wait_pid_exit(int(sys.argv[sys.argv.index("--wait-pid") + 1]))
+        except (ValueError, IndexError):
+            pass
     if "--why" in sys.argv:
         return scene_report()
     if "--selftest" in sys.argv:

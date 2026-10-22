@@ -10,6 +10,36 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## English
 
+### [1.3.1] — 2026-10-22
+
+Two reports from daily use: the tray menu popped up **without clicking**, and once
+open it **would not go away**.
+
+#### Fixed
+
+- **The menu opened on hover.** The notification-area callback delivers *every*
+  mouse event to `uCallbackMessage` — including `WM_MOUSEMOVE` — not just clicks.
+  The handler was written as "if not double-click → open menu", so merely moving
+  the pointer over the icon opened it. Now only `WM_RBUTTONUP` opens the menu and
+  only `WM_LBUTTONDBLCLK` replays the effect; everything else is ignored.
+- **Nested menus.** `TrackPopupMenu` runs a modal loop that keeps dispatching
+  messages, so a second callback during that loop opened a second menu inside the
+  first — closing one revealed the next, which looked like "it won't close".
+  A `_menu_open` guard makes it re-entrant safe.
+- **Menu could not be dismissed by clicking outside.** This is the classic
+  notification-icon pitfall: the popup owner must be the foreground window. Our
+  overlay is `WS_EX_NOACTIVATE`, so `SetForegroundWindow` silently failed. The menu
+  is now owned by a dedicated 1×1 fully transparent window that *can* take
+  foreground, and the code temporarily attaches to the current foreground thread's
+  input queue so the call is not refused.
+
+#### Added
+
+- **Auto-reload.** A running instance watches its own source file. When it changes
+  (an update), it waits for the file to settle for 1.5 s, starts a fresh process
+  that waits for the old one to exit (so they do not race for the single-instance
+  mutex), and quits. Updates take effect without the user restarting anything.
+
 ### [1.3.0] — 2026-10-22
 
 **Custom appearance.** The arrow was always black and always 3×. Both are now
@@ -156,6 +186,30 @@ First public release.
 ---
 
 ## 中文
+
+### [1.3.1] — 2026-10-22
+
+两个来自日常使用的反馈：托盘菜单**没点就自己弹出来**，而且打开后**关不掉**。
+
+#### 修复
+
+- **鼠标划过就弹菜单。** 通知区回调会把**所有**鼠标事件都发给 `uCallbackMessage`，
+  包括 `WM_MOUSEMOVE`——不只是点击。而处理器写的是「不是双击就弹菜单」，
+  于是指针一移到图标上菜单就出来了。现在只有 `WM_RBUTTONUP` 弹菜单、
+  `WM_LBUTTONDBLCLK` 重播效果，其余一律忽略。
+- **嵌套菜单。** `TrackPopupMenu` 是模态的，它跑循环期间仍会派发消息，
+  于是第二次回调在第一个菜单里又开了一个菜单——关掉一层露出下一层，
+  看起来就是「关不掉」。加了 `_menu_open` 防重入。
+- **点菜单外面关不掉。** 这是托盘菜单的经典坑：弹出菜单的拥有者必须是前台窗口。
+  我们的叠加窗口是 `WS_EX_NOACTIVATE`，`SetForegroundWindow` 一直静默失败。
+  现在改由一个 1×1 的全透明窗口来"拥有"菜单（它能拿到前台），
+  并且临时挂到当前前台线程的输入队列上，避免抢前台被拒。
+
+#### 新增
+
+- **自动重启。** 运行中的实例会盯着自己的源文件，一旦被替换（更新了版本），
+  等文件稳定 1.5 秒后启动一个新进程；新进程会先等旧进程退出
+  （避免两者抢单实例锁），旧进程随即退出。用户不用手动重开。
 
 ### [1.3.0] — 2026-10-22
 

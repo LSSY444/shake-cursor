@@ -76,6 +76,13 @@ Open `shake_cursor.pyw` — the constants are at the top:
 
 Restart the app after editing.
 
+## Updating
+
+Replace `shake_cursor.pyw` (or `git pull`). A running instance notices the file
+changed, waits 1.5 s for it to settle, launches a fresh process that waits for the
+old one to exit, then quits — so the new code takes effect without restarting
+anything by hand. `settings.json` is never touched by an update.
+
 ## Tray menu
 
 The icon lives in the notification area (Windows 11 hides new icons under the **^**
