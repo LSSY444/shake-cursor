@@ -18,6 +18,5 @@
   "appearance": {
     "scale": 3.0,
     "color": "#000000"
-  },
-  "tray_hint_shown": true
+  }
 }

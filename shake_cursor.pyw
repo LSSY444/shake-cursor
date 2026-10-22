@@ -30,7 +30,7 @@ from ctypes import (POINTER, Structure, byref, c_int, c_ssize_t, c_ubyte, c_uint
 from ctypes import wintypes as w
 
 # ============================ 可调参数 ============================
-__version__       = "1.3.1"   # 1.3.1: 修托盘交互 + 自动重启; 1.3.0: 外观自定义
+__version__       = "1.3.2"   # 1.3.2: 运行期状态移出配置; 1.3.1: 修托盘交互
 PEAK_SCALE        = 3.0    # 默认峰值放大倍数(可在 settings.json 的 appearance.scale 覆盖)
 GROW_SEC          = 0.13   # 放大耗时(秒)
 HOLD_SEC          = 0.72   # 保持最大时长(秒)
@@ -483,6 +483,9 @@ def _ease_in_out(x):
 #   3. 进程黑白名单(用户可控, 白名单优先级最高)。
 SETTINGS_PATH = (os.environ.get("SHAKE_CURSOR_SETTINGS")
                   or os.path.join(APP_DIR, "settings.json"))   # 测试可指向临时文件
+STATE_PATH = ((os.environ["SHAKE_CURSOR_SETTINGS"] + ".state")
+              if os.environ.get("SHAKE_CURSOR_SETTINGS")
+              else os.path.join(APP_DIR, "state.json"))   # 运行期状态, 不进仓库
 
 DEFAULT_SETTINGS = {
     "suppress_in": {
@@ -813,18 +816,22 @@ class Scene:
         except Exception:
             logging.warning("写外观配置失败", exc_info=True)
 
-    def set_flag(self, key, value=True):
-        """往 settings.json 里写一个状态标记(不是配置项, 例如首次提示已展示)。"""
-        data = dict(DEFAULT_SETTINGS)
-        if self.settings:
-            data.update(self.settings)
+    def state(self):
+        """运行期状态(不是配置)。单独存, 免得污染 settings.json 这个模板。"""
+        try:
+            with open(STATE_PATH, "r", encoding="utf-8") as f:
+                return json.load(f) or {}
+        except Exception:
+            return {}
+
+    def set_state(self, key, value=True):
+        data = self.state()
         data[key] = value
         try:
-            with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            with open(STATE_PATH, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-            self.reload(force=True)
         except Exception:
-            logging.debug("写入标记 %s 失败", key, exc_info=True)
+            logging.debug("写入状态 %s 失败", key, exc_info=True)
 
     def toggle_blacklist(self, exe):
         """把某个进程加入/移出黑名单, 返回 True=已加入, False=已移除, None=失败。"""
@@ -1375,12 +1382,12 @@ class App:
         except Exception:
             logging.warning("托盘创建失败, 程序照常可用(只是没有菜单)", exc_info=True)
             self.tray = _NoTray()
-        if self.tray.added and not self.scene.settings.get("tray_hint_shown"):
+        if self.tray.added and not self.scene.state().get("tray_hint_shown"):
             self.tray.balloon(
                 "摇一摇找鼠标 已就绪",
                 "图标在任务栏右下角(可能在 ^ 折叠区里)。" +
                 "右键它可暂停、设开机自启、或让某个程序不弹。")
-            self.scene.set_flag("tray_hint_shown", True)
+            self.scene.set_state("tray_hint_shown", True)
 
     # ---------- 预渲染 ----------
     def _build_frames(self):

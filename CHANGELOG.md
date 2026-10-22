@@ -10,6 +10,18 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## English
 
+### [1.3.2] — 2026-10-22
+
+**Runtime state moved out of the config.** `settings.json` doubles as the shipped
+template, and the "first-run tip already shown" flag was being written into it —
+which meant every clone inherited the flag and **never saw the balloon pointing at
+the tray icon**. This had already been fixed once and came back in the next commit
+that ran `git add -A`.
+
+State now lives in `state.json` (gitignored); `settings.json` only holds settings.
+Rename a state key and the template stays pristine forever, no matter what the app
+writes at runtime.
+
 ### [1.3.1] — 2026-10-22
 
 Two reports from daily use: the tray menu popped up **without clicking**, and once
@@ -186,6 +198,15 @@ First public release.
 ---
 
 ## 中文
+
+### [1.3.2] — 2026-10-22
+
+**运行期状态移出配置文件。** `settings.json` 同时充当仓库模板，而「首次提示已展示」这个标记
+一直被写进它——于是**每个新克隆的人都继承了该标记，永远看不到指向托盘图标的引导气泡**。
+这问题修过一次，但下一个跑了 `git add -A` 的提交又把它带回来了。
+
+现在状态单独存 `state.json`（已加入 `.gitignore`），`settings.json` 只放配置。
+以后无论程序在运行期写什么，模板都不会被污染。
 
 ### [1.3.1] — 2026-10-22
 

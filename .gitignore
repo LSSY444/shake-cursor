@@ -13,3 +13,6 @@ venv/
 .idea/
 Thumbs.db
 desktop.ini
+
+# runtime state (never commit: it belongs to whoever is running the app)
+state.json
