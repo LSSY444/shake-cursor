@@ -14,5 +14,6 @@
     "mstsc.exe"
   ],
   "process_whitelist": [],
-  "log_suppressed": true
+  "log_suppressed": true,
+  "tray_hint_shown": true
 }

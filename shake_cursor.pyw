@@ -946,6 +946,26 @@ def _set_autostart(on):
         return False
 
 
+class _NoTray:
+    """托盘不可用时的替身, 保证核心功能不受影响。"""
+    added = False
+    taskbar_created = 0
+
+    def add(self):
+        pass
+
+    def remove(self):
+        pass
+
+    def refresh(self):
+        pass
+
+    def balloon(self, *a, **k):
+        pass
+
+    def show_menu(self):
+        pass
+
 class Tray:
     """系统托盘图标 + 右键菜单。"""
 
@@ -972,7 +992,10 @@ class Tray:
                 return icon
         except Exception:
             logging.warning("生成托盘图标失败, 改用默认图标", exc_info=True)
-        return user32.LoadIconW(None, w.LPCWSTR(32512))      # IDI_APPLICATION
+        try:
+            return user32.LoadIconW(None, w.LPCWSTR(32512))      # IDI_APPLICATION
+        except Exception:
+            return None
 
     def add(self):
         nid = NOTIFYICONDATAW()
@@ -1144,8 +1167,12 @@ class App:
         self.pause_until = None
         self._build_frames()
         self._create_window()
-        self.tray = Tray(self)
-        if not self.scene.settings.get("tray_hint_shown"):
+        try:
+            self.tray = Tray(self)
+        except Exception:
+            logging.warning("托盘创建失败, 程序照常可用(只是没有菜单)", exc_info=True)
+            self.tray = _NoTray()
+        if self.tray.added and not self.scene.settings.get("tray_hint_shown"):
             self.tray.balloon(
                 "摇一摇找鼠标 已就绪",
                 "图标在任务栏右下角(可能在 ^ 折叠区里)。" +
