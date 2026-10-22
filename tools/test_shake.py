@@ -147,7 +147,23 @@ def cases():
     out.append(("滑一下 -> 停 2s -> 再滑一下",
                 swipe(0.22, 400) + pause(2.0) + swipe(0.22, -400) + pause(0.2)
                 + swipe(0.22, 400) + pause(0.2) + swipe(0.22, -400), [], False))
+
+    # 10. 移动光标时冲过头再回调 —— 3 次转向, 但整体是在"赶路"
+    out.append(("移动光标+过冲修正",
+                swipe(0.20, 260) + swipe(0.06, -45) + swipe(0.15, 120)
+                + swipe(0.05, -30) + swipe(0.12, 90), [], False))
+
+    # 11. 12px 的小幅左右抖动 —— 折返够, 但没"扫"出去
+    out.append(("12px 小幅左右抖",
+                swipe(0.10, 14) + swipe(0.10, -14) + swipe(0.10, 14)
+                + swipe(0.10, -14), [], False))
+
+    # 12. 精细操作: 小范围来回微调(选文字/对齐)
+    out.append(("精细微调(30px 来回)",
+                swipe(0.12, 30) + swipe(0.12, -30) + swipe(0.12, 30)
+                + swipe(0.12, -30), [], False))
     return out
+
 
 
 def main():

@@ -17,6 +17,7 @@
 
 import atexit
 import ctypes
+from collections import deque
 import json
 import logging
 import math
@@ -30,7 +31,7 @@ from ctypes import (POINTER, Structure, byref, c_int, c_ssize_t, c_ubyte, c_uint
 from ctypes import wintypes as w
 
 # ============================ 可调参数 ============================
-__version__       = "1.4.0"   # 1.4.0: 触控板可用的灵敏度; 1.3.2: 状态分离
+__version__       = "1.5.0"   # 1.5.0: 按运动形状判定; 1.4.0: 触控板可触发
 PEAK_SCALE        = 3.0    # 默认峰值放大倍数(可在 settings.json 的 appearance.scale 覆盖)
 GROW_SEC          = 0.13   # 放大耗时(秒)
 HOLD_SEC          = 0.72   # 保持最大时长(秒)
@@ -41,15 +42,17 @@ SHAKE_REVERSALS   = 3      # 窗口内需要的折返次数(3 次 ≈ 来回晃 
 PAUSE_BUDGET      = 1.20   # 连续静止超过这么久, 认为这次手势结束并清零
 MOVE_EPS          = 0.6    # 小于这个位移算"没动"(触控板空闲时会抖几个 0.1px)
 AXIS_DOMINANCE    = 1.8    # 主导轴摆幅至少要是对另一轴的这么多倍(挡掉画圈)
+SHAKE_MIN_SWING   = 45     # 一次摆动的最小振幅(px) —— 必须真的"扫出去"
+SHAKE_PATH_RATIO  = 2.5    # 路径/振幅 —— 必须真的来回扫, 单向移动约等于 1
 
 # 灵敏度档位: 触控板用户抬手指会有停顿, 所以默认窗口比鼠标时代宽
 SHAKE_PROFILES = {
-    "low":    {"min_run": 16, "reversals": 3, "window": 0.45},
+    "low":    {"min_run": 16, "reversals": 3, "window": 0.45, "min_swing": 60},
     "normal": {"min_run": SHAKE_MIN_RUN, "reversals": SHAKE_REVERSALS,
-               "window": SHAKE_WINDOW},
+               "window": SHAKE_WINDOW, "min_swing": SHAKE_MIN_SWING},
     # 高灵敏只降"单程门槛", 不降折返次数 —— 次数少于 3 时历史不够,
     # 主导轴判定会失效(画圈会被误判成晃动), 这个在测试里验证过。
-    "high":   {"min_run": 8,  "reversals": 3, "window": 1.30},
+    "high":   {"min_run": 8,  "reversals": 3, "window": 1.30, "min_swing": 30},
 }
 SENSITIVITY_LABELS = {"low": "低(怕误触)", "normal": "标准", "high": "高(最好触发)"}
 POLL_SEC          = 0.008  # 鼠标采样间隔
@@ -387,47 +390,81 @@ def build_frame(scale, dpi, fill=(0, 0, 0)):
 
 # ============================ 摇动识别 ============================
 class AxisShake:
-    """单轴折返计数。两个关键点都来自真实手势, 不是想当然:
+    """单轴晃动识别 —— 判的是"运动的形状", 不是数小折返。
 
-    1. **时间窗累计"动作时间"**, 不是墙上时间。
-       触控板的节奏是 滑一下 -> 抬手指(150~300ms 无位移) -> 滑回来。
-       按墙上时间算, 抬手指的停顿会把窗口吃掉, 四下滑完只攒得到一两次折返。
-       所以只在"确实在动"时推进时钟, 并用 PAUSE_BUDGET 限制总停顿。
+    一条折返只说明"转向了", 不能说明你在晃。真实误触长这样:
 
-    2. **反向只要够 min_run 就算折返**, 不需要把整条腿吃回去。
-       旧写法要求反向累计抵消掉前一整段位移, 但触控板滑到屏幕边缘/手指到头时
-       光标会先停住(acc 归零、peak 归零), 下一滑的开头就变成"折返但摆幅为 0",
-       直接被丢掉 —— 这正是"滑了好几下都不触发"的直接原因。
+        ▸ 移动光标时冲过头, 往回调 40px, 再继续 —— 3 次转向, 但它是在"赶路"
+        ▸ 12px 的小幅左右抖动 —— 3 次折返, 但根本没"扫"出去
 
-    3. 手离开超过 PAUSE_BUDGET 就清零, 免得十分钟前的折返被算进这一次。
+    所以在动作时间窗内, 除了折返次数, 还要看两个形状指标:
+
+        amplitude = 窗口内最高点 - 最低点        >= SHAKE_MIN_SWING(45px)
+        path / amplitude                         >= SHAKE_PATH_RATIO(2.5)
+
+    单向拖拽的 path/amplitude ≈ 1.0; 过冲修正 ≈ 1.2; 真的来回扫 ≈ 3 以上。
+    这样"来回扫"才成立, 而"一边走一边修正"和"原地小抖动"都被挡在外面。
+
+    另外两个从触控板实测来的关键点:
+      · 时间窗累计**动作时间**, 不是墙上时间 —— 抬手指的停顿不该吃掉窗口;
+      · 反向只要够 min_run 就算折返 —— 顶点停住后 leg 已归零, 不能要求"吃回整条腿"
+        (否则触控板滑四下只攒到一两次)。
     """
 
-    def __init__(self, min_run, reversals=None, window=None):
+    def __init__(self, min_run, reversals=None, window=None, min_swing=None):
         self.min_run = min_run
         self.need = reversals or SHAKE_REVERSALS
         self.window = window or SHAKE_WINDOW
+        self.min_swing = min_swing or SHAKE_MIN_SWING
         self.dir = 0
-        self.leg = 0.0          # 当前方向已累计的位移
-        self.back = 0.0         # 反方向已累计的位移(达到 min_run 就算折返)
-        self.revs = []          # 折返发生的"动作时间"刻度
-        self.active = 0.0       # 本轴累计动作时间
-        self.idle = 0.0         # 连续静止时长
-        self.swing = 0.0        # 本次手势里最大的一次单程摆幅
+        self.leg = 0.0
+        self.back = 0.0
+        self.revs = []
+        self.active = 0.0
+        self.idle = 0.0
+        self.swing = 0.0
+        self.pos = 0.0
+        self.samples = deque()
+        self.stats = (0.0, 0.0)     # (amplitude, path)
         self.last_t = None
 
+    # ---------- 时间与样本 ----------
+    def _append(self, delta):
+        self.pos += delta
+        self.samples.append((self.active, self.pos))
+        cutoff = self.active - self.window - 0.25
+        while len(self.samples) > 2 and self.samples[0][0] < cutoff:
+            self.samples.popleft()
+
+    def _shape(self):
+        """窗口内的 (amplitude, path)。"""
+        if len(self.samples) < 2:
+            return 0.0, 0.0
+        lo = self.active - self.window
+        pts = [p for (t, p) in self.samples if t >= lo]
+        if len(pts) < 2:                     # 窗口内样本太少, 用最后两个
+            pts = [p for (_, p) in list(self.samples)[-2:]]
+        amp = max(pts) - min(pts)
+        path = 0.0
+        for i in range(len(pts) - 1):
+            path += abs(pts[i + 1] - pts[i])
+        return amp, path
+
+    # ---------- 主循环每帧调用 ----------
     def feed(self, t, delta):
         dt = 0.0 if self.last_t is None else t - self.last_t
         self.last_t = t
-        dt = max(0.0, min(0.05, dt))        # 系统挂起后 dt 会很大, 夹住
+        dt = max(0.0, min(0.05, dt))
 
         if abs(delta) < MOVE_EPS:
             self.idle += dt
             if self.idle > PAUSE_BUDGET and self.dir:
-                self.reset(keep_timer=True)     # 手离开太久, 这次手势结束
+                self.reset(keep_timer=True)
             return False
 
         self.active += dt
         self.idle = 0.0
+        self._append(delta)
         d = 1 if delta > 0 else -1
 
         if self.dir == 0 or self.leg <= 0.0:
@@ -438,28 +475,32 @@ class AxisShake:
 
         if d == self.dir:
             self.leg += abs(delta)
-            self.back = 0.0                     # 同一方向继续走, 反向尝试作废
+            self.back = 0.0
             return False
 
         self.back += abs(delta)
         if self.back < self.min_run:
-            return False                        # 反向还不够深, 可能只是抖动
+            return False
 
-        # 反向达到阈值: 算一次折返(前提是刚走过的那条腿也够长)
         rev = self.leg >= self.min_run
         if rev:
             self.revs.append(self.active)
-            if self.leg > self.swing:
-                self.swing = self.leg
+            amp, path = self._shape()
+            self.stats = (amp, path)
+            if amp > self.swing:
+                self.swing = amp
         self.dir = d
-        self.leg = self.back                    # 反向这段已经走了这么远
+        self.leg = self.back
         self.back = 0.0
         if rev:
             self.revs = [x for x in self.revs if self.active - x <= self.window]
         return rev
 
     def hit(self):
-        return len(self.revs) >= self.need
+        if len(self.revs) < self.need:
+            return False
+        amp, path = self.stats
+        return amp >= self.min_swing and path >= SHAKE_PATH_RATIO * amp
 
     def reset(self, keep_timer=False):
         self.revs = []
@@ -467,6 +508,9 @@ class AxisShake:
         self.leg = self.back = 0.0
         self.swing = 0.0
         self.idle = 0.0
+        self.pos = 0.0
+        self.samples.clear()
+        self.stats = (0.0, 0.0)
         if not keep_timer:
             self.active = 0.0
             self.last_t = None
@@ -1509,8 +1553,9 @@ class App:
         p = SHAKE_PROFILES.get(self.sens_name, SHAKE_PROFILES["normal"])
         self.detectors = [AxisShake(p["min_run"], p["reversals"], p["window"]),
                           AxisShake(p["min_run"], p["reversals"], p["window"])]
-        logging.info("摇动识别: %s (单程≥%dpx, %d次折返, 窗口%.2fs)",
-                     self.sens_name, p["min_run"], p["reversals"], p["window"])
+        logging.info("摇动识别: %s (单程≥%dpx, %d次折返, 窗口%.2fs, 振幅≥%dpx)",
+                     self.sens_name, p["min_run"], p["reversals"], p["window"],
+                     p.get("min_swing", SHAKE_MIN_SWING))
 
     def apply_sensitivity(self):
         """档位变了就换检测器(不打断正在播放的动画)。"""

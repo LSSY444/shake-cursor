@@ -10,6 +10,43 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## English
 
+### [1.5.0] — 2026-10-22
+
+**The trigger mechanism changed: it now judges the shape of the motion.**
+
+1.4.0 made touchpads work but overcorrected — it got too easy to fire. The cause was
+structural, not a threshold: a reversal was counted as soon as the opposite stroke
+reached 12 px, so "3 reversals" could be satisfied by things that are not shakes at all.
+Both reproductions were confirmed with the trace harness before touching any code:
+
+| trace | old verdict |
+| --- | --- |
+| move the cursor, overshoot, correct 45 px, carry on (twice) | **fired** |
+| wobble ±12 px four times | **fired** |
+
+#### Changed
+
+- A shake is now defined by **shape**, measured over the active-time window at every
+  reversal:
+  - **amplitude** = max − min position ≥ `SHAKE_MIN_SWING` (45 px) — you actually swept;
+  - **path / amplitude** ≥ `SHAKE_PATH_RATIO` (2.5) — you actually came back.
+
+  A monotone drag scores ≈ 1.0 and an overshoot correction ≈ 1.2, so both are rejected
+  while a real back-and-forth scores 3+. Reversals are still required (≥3), but they are
+  now a cheap gate rather than the criterion.
+- `PAUSE_BUDGET`, active-time windows and the dominant-axis check are unchanged.
+
+#### Sensitivity now moves thresholds, not the criterion
+
+| Level | min stroke | reversals | window | amplitude |
+| --- | --- | --- | --- | --- |
+| low | 16 px | 3 | 0.45 s | 60 px |
+| normal | 12 px | 3 | 1.0 s | 45 px |
+| high | 8 px | 3 | 1.3 s | 30 px |
+
+`tools/test_shake.py` grew the two false-positive traces above plus a 30 px
+fine-adjustment case; all 12 traces now pass at every level.
+
 ### [1.4.0] — 2026-10-22
 
 **Touchpad support for the trigger.** Reported as "I swiped several times and nothing
@@ -228,6 +265,40 @@ First public release.
 ---
 
 ## 中文
+
+### [1.5.0] — 2026-10-22
+
+**判定机制换了：现在判的是运动的形状。**
+
+1.4.0 让触控板能触发了，但矫枉过正 —— 太容易误触。原因不在参数，在机制：
+反向只要够 12px 就算一次折返，于是"3 次折返"完全可以被**不是晃动的动作**凑出来。
+改代码之前，两种误触都用轨迹测试复现了：
+
+| 轨迹 | 旧版判定 |
+| --- | --- |
+| 移动光标 → 冲过头 → 回调 45px → 继续（来回两次） | **触发了** |
+| ±12px 左右抖四下 | **触发了** |
+
+#### 改动
+
+- 用**形状**定义晃动（在动作时间窗内、每次折返时统计）：
+  - **振幅** = 窗口内最高点 − 最低点 ≥ `SHAKE_MIN_SWING`（45px）—— 真的扫出去了；
+  - **路径 / 振幅** ≥ `SHAKE_PATH_RATIO`（2.5）—— 真的来回扫了。
+
+  单向拖拽 ≈ 1.0，过冲修正 ≈ 1.2，都会被挡掉；真的来回扫 ≥ 3。
+  折返次数仍然要 ≥3，但它从"判据"降级成"廉价的前置条件"。
+- `PAUSE_BUDGET`、动作时间窗、主导轴判定都不变。
+
+#### 灵敏度只动阈值，不动判据
+
+| 档位 | 单程门槛 | 折返 | 时间窗 | 振幅下限 |
+| --- | --- | --- | --- | --- |
+| 低 | 16px | 3 | 0.45s | 60px |
+| 标准 | 12px | 3 | 1.0s | 45px |
+| 高 | 8px | 3 | 1.3s | 30px |
+
+`tools/test_shake.py` 增加了上面两条误触轨迹和一个 30px 精细微调用例，
+现在 12 条轨迹在三个档位上全部符合预期。
 
 ### [1.4.0] — 2026-10-22
 

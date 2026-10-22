@@ -48,39 +48,49 @@ No installer, no admin rights, no services. To stop it, press `Ctrl + Alt + Q` o
 
 ## How the shake is detected
 
-Not a simple distance threshold — each axis runs a small state machine:
+**It judges the shape of the motion, not the number of reversals.** Counting direction
+changes alone is too weak — two everyday false positives:
 
-- an opposite stroke of `SHAKE_MIN_RUN` (12 px) counts as a reversal; the reverse does
-  **not** have to retrace the whole previous stroke;
-- **3 reversals within 1 s of movement** fire the effect;
-- the motion must be **roughly along one axis**: the dominant axis has to swing at least
-  1.8× further than the other, otherwise it is treated as a circle/scribble.
+- moving the cursor, overshooting, correcting a little, carrying on: 3 direction changes,
+  but you are *travelling*
+- a 12 px wobble: enough reversals, but nothing was ever swept
 
-So slow drags, circles, a shaky hand or slowly swinging back and forth **do not** trigger it.
+So on top of the reversal count, two **shape metrics** are measured over the window:
+
+| Metric | Threshold | Meaning |
+| --- | --- | --- |
+| amplitude | ≥ 45 px | max − min position in the window — you actually swept somewhere |
+| path / amplitude | ≥ 2.5 | whether you came back |
+
+A monotone drag is ≈ **1.0**, an overshoot correction ≈ **1.2**, a real back-and-forth
+is **3+**. That ratio is the line between "shaking" and "travelling with corrections".
+
+Plus three more conditions: at least **3 reversals**, each confirmed by a 12 px opposite
+stroke; the window is **1 s of movement** (not wall clock) and a rest longer than 1.2 s
+ends the gesture; and the motion must be roughly along one axis (dominant ≥ 1.8× the
+other), which is what rules out circles.
+
+Slow drags, circles, a shaky hand, overshoot corrections and small wobbles all stay quiet.
 
 ### Why "movement time", and why touchpads
 
-This is what 1.4.0 fixed. A touchpad gesture looks like: **swipe → lift finger
-(150–300 ms of no movement) → swipe back**.
+A touchpad gesture is *swipe → lift finger (150–300 ms of nothing) → swipe back*.
+Measuring the window on wall clock let the pause eat it, so four swipes accumulated one or
+two reversals. The window now advances only while the pointer moves.
 
-The old code measured the window in *wall-clock* time, so the pause counted too: four
-swipes only accumulated one or two reversals, and the app seemed dead. The window now
-advances only while the pointer is actually moving; a continuous rest of more than 1.2 s
-is what ends a gesture.
-
-Circles were a separate long-standing false positive: an orbit moves both axes
-sinusoidally, which looks exactly like a shake on either axis alone. Requiring a dominant
-axis fixes it — at the cost of not recognising a *diagonal* shake, which nobody does.
+Also: the cursor comes to rest at the apex of every swipe, so the accumulated leg is
+already zero — a reversal therefore cannot require retracing the whole previous stroke,
+which is what the pre-1.4.0 code did and why touchpads barely worked.
 
 ### Sensitivity
 
 Tray menu → **触发灵敏度** (or `sensitivity` in `settings.json`):
 
-| Level | Min stroke | Reversals | Window | For |
+| Level | Min stroke | Reversals | Window | Amplitude | For |
 | --- | --- | --- | --- | --- |
-| `low` | 16 px | 3 | 0.45 s | you get false triggers, want only clear shakes |
-| `normal` | 12 px | 3 | 1.0 s | default, works for mouse and touchpad |
-| `high` | 8 px | 3 | 1.3 s | light fingers / small touchpad |
+| `low` | 16 px | 3 | 0.45 s | 60 px | you get false triggers, want only clear shakes |
+| `normal` | 12 px | 3 | 1.0 s | 45 px | default, works for mouse and touchpad |
+| `high` | 8 px | 3 | 1.3 s | 30 px | light fingers / small touchpad |
 
 All three keep **3 reversals** on purpose: at 2 the history is too short for the
 dominant-axis test and circles start firing again — that boundary is pinned by
@@ -101,6 +111,8 @@ Open `shake_cursor.pyw` — the constants are at the top:
 | `SHAKE_REVERSALS` | `3` | Reversals required inside the window |
 | `PAUSE_BUDGET` | `1.20` | A rest longer than this ends the gesture (touchpad lift) |
 | `AXIS_DOMINANCE` | `1.8` | Dominant-axis ratio; below this it is treated as a circle |
+| `SHAKE_MIN_SWING` | `45` | Amplitude floor in px — kills small wobbles |
+| `SHAKE_PATH_RATIO` | `2.5` | Path/amplitude floor — kills travelling-with-corrections |
 | `HIDE_SYSTEM_CUR` | `True` | Hide the real cursor while overlaying (see below) |
 | `OUTLINE_RATIO` | `0.08` | White outline thickness, relative to arrow height |
 
