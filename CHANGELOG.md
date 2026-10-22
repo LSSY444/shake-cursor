@@ -10,6 +10,36 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## English
 
+### [1.4.0] — 2026-10-22
+
+**Touchpad support for the trigger.** Reported as "I swiped several times and nothing
+happened", and the guess was right: the gesture was being interrupted by the finger lift.
+
+#### Fixed
+
+- **The reversal window counted wall-clock time.** A touchpad gesture is
+  *swipe → lift finger (150–300 ms of no movement) → swipe back*. The pause consumed the
+  0.6 s window, so four swipes accumulated one or two reversals and the app looked dead.
+  The window now advances only while the pointer actually moves; a continuous rest of
+  more than 1.2 s (`PAUSE_BUDGET`) is what ends a gesture.
+- **A reversal required retracing the entire previous stroke.** When the cursor comes to
+  rest at the apex (exactly what a touchpad does between swipes) the accumulated leg is
+  already zero, so the next stroke started with a zero-length leg and was discarded.
+  A reversal now counts as soon as the opposite stroke reaches `min_run`.
+- **Circles triggered the effect.** An orbit moves both axes sinusoidally, which looks
+  identical to a shake on either axis alone. The motion must now be roughly linear: the
+  dominant axis has to swing at least 1.8× further than the other.
+
+#### Added
+
+- **Sensitivity levels** (`low` / `normal` / `high`) in the tray menu and as
+  `sensitivity` in `settings.json`. All levels keep 3 reversals — at 2 the history is too
+  short for the dominant-axis test and circles fire again.
+- `tools/test_shake.py`: drives the state machine with synthetic traces (mouse wiggle,
+  touchpad multi-swipe with lifts, slow drag, hand tremor, circle, long pause) and asserts
+  trigger / no-trigger for each, across all three sensitivity levels. The touchpad cases
+  failed before this change — that is how the bug was pinned down.
+
 ### [1.3.2] — 2026-10-22
 
 **Runtime state moved out of the config.** `settings.json` doubles as the shipped
@@ -198,6 +228,28 @@ First public release.
 ---
 
 ## 中文
+
+### [1.4.0] — 2026-10-22
+
+**让触控板也能触发。** 反馈是「我滑了好几下都没反应」，而猜测是对的：手势被抬手指打断了。
+
+#### 修复
+
+- **折返窗口按墙上时间算。** 触控板的手势是 滑一下 → 抬手指（150~300ms 无位移）→ 滑回来，
+  那段停顿把 0.6 秒的窗口吃掉了，滑完四下只攒到一两次折返。现在窗口只在指针**真正移动**时推进，
+  连续静止超过 1.2 秒（`PAUSE_BUDGET`）才认为手势结束。
+- **折返要求把上一整段位移"吃回去"。** 光标在顶点停住时（正是触控板每次滑完的状态），
+  累计位移已经归零，下一滑的开头就变成"折返但腿长为 0"被直接丢弃。
+  现在反向只要走够 `min_run` 就算一次折返。
+- **画圈会误触发。** 画圈时两轴都是正弦，单轴看和晃动一模一样。
+  现在要求运动近似直线：主导轴摆幅至少是对另一轴的 1.8 倍。
+
+#### 新增
+
+- **触发灵敏度**（低 / 标准 / 高），托盘菜单可调，也可写进 `settings.json` 的 `sensitivity`。
+  三档都保持 3 次折返——降到 2 次时历史太短，主导轴判定会失效，画圈又会误判。
+- `tools/test_shake.py`：用合成轨迹（鼠标晃、触控板多次滑+抬指、慢拖、手抖、画圈、长停顿）
+  驱动状态机，逐档断言触发/不触发。**改之前触控板那几个用例是失败的**，问题就是这样定位的。
 
 ### [1.3.2] — 2026-10-22
 

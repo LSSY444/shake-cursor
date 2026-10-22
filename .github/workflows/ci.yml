@@ -21,7 +21,7 @@ jobs:
           python -c "import py_compile,sys;
           [py_compile.compile(f, doraise=True) for f in sys.argv[1:]]"
           shake_cursor.pyw autostart.py stop.py
-          tools/make_demo.py tools/publish.py tools/test_scene.py tools/test_tray.py tools/test_appearance.py
+          tools/make_demo.py tools/publish.py tools/test_scene.py tools/test_tray.py tools/test_appearance.py tools/test_shake.py
 
       - name: settings.json keeps the documented shape
         run: >
